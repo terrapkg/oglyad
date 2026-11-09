@@ -24,7 +24,7 @@ import Oglyad.Regex qualified as Re
 import Oglyad.Release
 import Oglyad.Report (ReleaseInfo (..), Report (..), renderJson, renderMarkdown, renderText)
 import Oglyad.Source.Anda (scriptErrors, stripAnsi)
-import Oglyad.Source.Monorepo (PkgDir (..), checkoutRef, findPackageDirs, hclString, lastCommits, macroFingerprint, pruneTrees, specFingerprint, versionMacros)
+import Oglyad.Source.Monorepo (PkgDir (..), checkoutRef, findPackageDirs, hclString, lastCommits, macroFingerprint, specFingerprint, versionMacros)
 import Oglyad.Source.Repodata (RpmEntry (..), decompressAndParse, fetchRepo, latestBySource, parsePrimary, srpmName)
 import Oglyad.Source.Rhai (parseUpdateRhai, parseUpdateRhaiWith)
 import Oglyad.Source.RhaiEval (Simulated (..), simulateVersion)
@@ -313,9 +313,9 @@ main = hspec $ do
     it "is quiet without upstream data" $
       Drift.check snapshot pkg `shouldBe` []
     it "doesn't hold nightlies to the latest stable release" $ do
-      let nightly = pkg {pkgNightly = True, pkgSpecEVR = Just (EVR 0 "0.41.0^20261031.9e2ed65" "1.fc44"), pkgUpstreamVer = Just "v0.42.0"}
-      Drift.check snapshot nightly `shouldBe` []
-      Drift.drift nightly `shouldBe` Nothing
+      let snap = pkg {pkgNightly = True, pkgSpecEVR = Just (EVR 0 "0.41.0^20261031.9e2ed65" "1.fc44"), pkgUpstreamVer = Just "v0.42.0"}
+      Drift.check snapshot snap `shouldBe` []
+      Drift.drift snap `shouldBe` Nothing
     it "still flags a mangled version on a nightly" $
       severities (Drift.check snapshot (pkg {pkgNightly = True, pkgUpstreamVer = Just ".0.1"})) `shouldBe` [Warn]
     it "warns when update.rhai mangles the version" $
@@ -439,9 +439,9 @@ main = hspec $ do
   describe "nightly labels" $
     it "treats nightly and quaterdaily as branch-head builds, not weekly" $
       withSystemTempDirectory "oglyad-labels" $ \root -> do
-        let pkgDir name label = do
+        let pkgDir name key = do
               createDirectoryIfMissing True (root </> "anda" </> name)
-              writeFile (root </> "anda" </> name </> "anda.hcl") ("project pkg {\n  labels {\n    " <> label <> " = 1\n  }\n}\n")
+              writeFile (root </> "anda" </> name </> "anda.hcl") ("project pkg {\n  labels {\n    " <> key <> " = 1\n  }\n}\n")
         pkgDir "n" "nightly"
         pkgDir "q" "quaterdaily"
         pkgDir "w" "weekly"
@@ -624,6 +624,8 @@ snapshot =
       snapConfig =
         Config
           { cfgMonorepo = ".",
+            cfgSpecRef = Nothing,
+            cfgBranch = "f44",
             cfgTerraRepo = "",
             cfgFedoraRepos = [],
             cfgRelease = 44,
