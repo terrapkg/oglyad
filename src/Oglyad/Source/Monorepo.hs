@@ -114,8 +114,6 @@ findPackageDirs root = go "anda"
             pdNightly = any (isJust . (`hclString` hcl)) ["nightly", "quaterdaily"]
           }
 
--- | pull the first `key = "value"` out of anda.hcl without a real HCL parser.
--- every anda.hcl in the monorepo is simple enough for this to hold up
 -- | the macro names a spec's Version: line refers to, read from the raw
 -- text: %name, %{name}, %{?name} and %{!?name:...} all count. rpmspec
 -- would expand them away, and what we want is which ones an update.rhai

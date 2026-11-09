@@ -164,12 +164,13 @@ compareUpstream up spec
     isPre v = "~" `T.isPrefixOf` T.drop (T.length (core v)) (T.dropWhileEnd (== '.') v)
 
 -- | a version with its snapshot suffix cut off: everything from a '^', or
--- from a git marker like ".git" or "~git"
+-- from a git marker like ".git" or "+git". not "~git", since that's a
+-- snapshot from before the release, so 2.0~git... really is behind 2.0
 --
 -- >>> snapshotBase "2.0.0~alpha~1~20250926.gitfc62ae7"
 -- "2.0.0~alpha~1~20250926"
 snapshotBase :: Text -> Text
 snapshotBase v =
   let base = T.takeWhile (/= '^') v
-      cuts = [pre | sep <- [".git", "~git", "+git", "_git"], let (pre, post) = T.breakOn sep base, not (T.null post)]
+      cuts = [pre | sep <- [".git", "+git", "_git"], let (pre, post) = T.breakOn sep base, not (T.null post)]
    in minimumBy (comparing T.length) (base : cuts)

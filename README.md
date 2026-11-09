@@ -1,7 +1,7 @@
 # oglyad
 
 repository metadata and health checker for [Terra](https://terra.fyralabs.com).
-"огляд" is Ukrainian for "review" or "inspection".
+"огляд" is Ukrainian for "review" or "inspection," but also for a health checkup.
 
 ```sh
 git clone https://github.com/terrapkg/packages ../packages
@@ -63,11 +63,11 @@ summaries) or `json`. the json is a versioned envelope:
 `monorepo_head` and `terra_repo` with `releases`, and added `releases` to
 findings. `ref` is `null` with `--worktree`.
 
-| exit | meaning |
-|---|---|
-| 0 | ran, nothing at or above `--fail-on` (default `error`, or `warn`, `info`, `never`) |
-| 1 | ran, and found something at or above `--fail-on` |
-| 2 | couldn't run: bad flags, unreadable ignore file, not a monorepo |
+| exit | meaning                                                                            |
+| ---- | ---------------------------------------------------------------------------------- |
+| 0    | ran, nothing at or above `--fail-on` (default `error`, or `warn`, `info`, `never`) |
+| 1    | ran, and found something at or above `--fail-on`                                   |
+| 2    | couldn't run: bad flags, unreadable ignore file, not a monorepo                    |
 
 ## ignoring known findings
 
@@ -81,8 +81,11 @@ names one check plus a monorepo `path` or a `package` name:
 ```json
 {
   "ignore": [
-    {"check": "duplicate-name", "path": "anda/langs/zig/master-bootstrap",
-     "reason": "bootstrap build of zig-master"}
+    {
+      "check": "duplicate-name",
+      "path": "anda/langs/zig/master-bootstrap",
+      "reason": "bootstrap build of zig-master"
+    }
   ]
 }
 ```
@@ -101,18 +104,18 @@ reported as `unused-ignore`, so exceptions don't outlive their reason. `--no-ign
 
 ## checks
 
-| check | severity | what it means |
-|---|---|---|
-| `build-lag` | error / warn / info | never published, merged but not built, or the repo is newer than your checkout |
-| `drift` | warn | upstream released something newer than the spec (`-u`). scripts oglyad can't follow on its own are run with the real anda, see below. packages with a `nightly` or `quaterdaily` label build from a branch head, so they're only checked for a mangled version, not held to the latest release |
-| `duplicate-name` | warn | two directories build the same package name into the same repo, so they overwrite each other |
-| `stale` | info, warn with `-u` | last build is older than `--stale-days`, warn if upstream also moved on |
-| `upstream-error` | warn | the upstream from update.rhai 404s or fails, so `anda update` is failing too |
-| `fedora-overlap` | warn | Fedora ships the same source package (`--fedora`). subrepos are exempt |
-| `no-autoupdate` | info | no update.rhai, or one with only comments in it |
-| `unparsed-rhai` | info, warn when anda can't run it either | update.rhai looks a version up in a way oglyad can't follow, like custom scraping, and anda didn't answer for it (no `-u`, or anda isn't installed). scripts that only bump Release, track a commit, or copy Version from another spec aren't listed |
-| `collect` | error | rpmspec failed, a repo couldn't be fetched, or an upstream rate-limited us (warn) |
-| `unused-ignore` | info / warn | an ignore entry matches nothing, or an `oglyad_ignore` label names an unknown check |
+| check            | severity                                 | what it means                                                                                                                                                                                                                                                                                  |
+| ---------------- | ---------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `build-lag`      | error / warn / info                      | never published, merged but not built, or the repo is newer than your checkout                                                                                                                                                                                                                 |
+| `drift`          | warn                                     | upstream released something newer than the spec (`-u`). scripts oglyad can't follow on its own are run with the real anda, see below. packages with a `nightly` or `quaterdaily` label build from a branch head, so they're only checked for a mangled version, not held to the latest release |
+| `duplicate-name` | warn                                     | two directories build the same package name into the same repo, so they overwrite each other                                                                                                                                                                                                   |
+| `stale`          | info, warn with `-u`                     | last build is older than `--stale-days`, warn if upstream also moved on                                                                                                                                                                                                                        |
+| `upstream-error` | warn                                     | the upstream from update.rhai 404s or fails, so `anda update` is failing too                                                                                                                                                                                                                   |
+| `fedora-overlap` | warn                                     | Fedora ships the same source package (`--fedora`). subrepos are exempt                                                                                                                                                                                                                         |
+| `no-autoupdate`  | info                                     | no update.rhai, or one with only comments in it                                                                                                                                                                                                                                                |
+| `unparsed-rhai`  | info, warn when anda can't run it either | update.rhai looks a version up in a way oglyad can't follow, like custom scraping, and anda didn't answer for it (no `-u`, or anda isn't installed). scripts that only bump Release, track a commit, or copy Version from another spec aren't listed                                           |
+| `collect`        | error                                    | rpmspec failed, a repo couldn't be fetched, or an upstream rate-limited us (warn)                                                                                                                                                                                                              |
+| `unused-ignore`  | info / warn                              | an ignore entry matches nothing, or an `oglyad_ignore` label names an unknown check                                                                                                                                                                                                            |
 
 ### scripts oglyad can't follow
 
@@ -153,12 +156,12 @@ tested with a fake `Snapshot` in `test/Spec.hs`.
 
 everything lives in `~/.cache/oglyad`.
 
-| file | reused while |
-|---|---|
+| file              | reused while                                                                                      |
+| ----------------- | ------------------------------------------------------------------------------------------------- |
 | `specs.fcNN.json` | the package dir's files, the dist tag, and rpm's whole macro state (`rpm --showrc`) are unchanged |
-| `commits.json` | HEAD hasn't moved |
-| `repodata-*.json` | the repo's primary.xml checksum is unchanged |
-| `upstream.json` | younger than `--cache-hours` (default 6), successes only. entries unused for 30 days are dropped |
+| `commits.json`    | HEAD hasn't moved                                                                                 |
+| `repodata-*.json` | the repo's primary.xml checksum is unchanged                                                      |
+| `upstream.json`   | younger than `--cache-hours` (default 6), successes only. entries unused for 30 days are dropped  |
 
 a run with warm caches takes about 0.4s. a cold run takes about 5s, almost
 all of it in rpmspec. `--fedora` adds about 8s and peaks around 200MB of
@@ -199,9 +202,9 @@ caches carry over between nights.
 
 built the same way as anda itself. [`anda.hcl`](anda.hcl) has two projects:
 
-| project | spec | builds |
-|---|---|---|
-| `oglyad` | [`oglyad.spec`](oglyad.spec) | the `v<version>` release tag |
+| project      | spec                                 | builds                                                        |
+| ------------ | ------------------------------------ | ------------------------------------------------------------- |
+| `oglyad`     | [`oglyad.spec`](oglyad.spec)         | the `v<version>` release tag                                  |
 | `oglyad-git` | [`oglyad-git.spec`](oglyad-git.spec) | the checked-out commit, versioned `<version>^<date>.<commit>` |
 
 ```sh

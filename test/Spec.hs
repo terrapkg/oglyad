@@ -108,7 +108,9 @@ main = hspec $ do
         ("2.0.0-alpha-1-20250926", "2.0.0~alpha~1~20250926.gitfc62ae7", EQ),
         ("0.4-2", "0.4~2^20260805git.d5d9f60", EQ),
         ("1.3", "1.2^20260101git.abc1234", GT),
-        ("1.2", "1.2~rc1^20260101git.abc1234", GT)
+        ("1.2", "1.2~rc1^20260101git.abc1234", GT),
+        -- a ~git snapshot comes before the release, so it's behind it
+        ("2.0", "2.0~git20250101.abc1234", GT)
       ]
 
   describe "isSemver" $ do

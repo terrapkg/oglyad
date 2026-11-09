@@ -132,8 +132,9 @@ resolveReleases mk args
         Right b -> parseBodhiReleases b
     runError msg = hPutStrLn stderr ("oglyad: " <> T.unpack msg) >> exitWith exitUsage
 
--- | GITHUB_TOKEN, or whatever the gh cli is logged in with. the token is only
--- ever sent to api.github.com, and never passed to child processes
+-- | GITHUB_TOKEN, or whatever the gh cli is logged in with. oglyad itself
+-- only sends it to api.github.com. the one child process that gets it is
+-- anda (see Oglyad.Source.Anda), since its GitHub helpers need it
 githubToken :: IO (Maybe Text)
 githubToken =
   lookupEnv "GITHUB_TOKEN" >>= \case
