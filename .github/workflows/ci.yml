@@ -42,8 +42,19 @@ jobs:
 
       # prints a diff for every unformatted file. fix them locally with:
       #   ormolu --mode inplace $(git ls-files '*.hs')
+      # in a container the checkout belongs to another user, so git refuses to
+      # read it until it's marked safe. an empty file list is an error, since
+      # ormolu would otherwise wait on stdin
       - name: Check formatting
-        run: git ls-files -z '*.hs' | xargs -0 ormolu --mode check --check-idempotence
+        shell: bash
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mapfile -d '' files < <(git ls-files -z '*.hs')
+          if [ "${#files[@]}" -eq 0 ]; then
+            echo "no Haskell files found, refusing to pass"
+            exit 1
+          fi
+          ormolu --mode check --check-idempotence "${files[@]}"
 
   build:
     name: build and test (Fedora libraries)
