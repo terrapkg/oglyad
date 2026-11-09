@@ -137,19 +137,30 @@ request gets redirected anywhere else.
 ## nightly report
 
 [`report.yml`](.github/workflows/report.yml) runs every night in Terra's
-builder image (`ghcr.io/terrapkg/builder:f44`), so specs evaluate with the
-same macros Terra builds with. it builds oglyad from
-[the Terra spec](packaging/terra), checks terrapkg/packages' default branch
-with `-u --fedora`, writes the markdown report to the run's summary, and keeps
-the markdown and json for 30 days. caches carry over between nights.
+builder image (`ghcr.io/terrapkg/builder:f45`), so specs evaluate with the
+same macros Terra builds with. it builds `oglyad-git` with anda, checks
+terrapkg/packages' default branch with `-u --fedora`, writes the markdown
+report to the run's summary, and keeps the markdown and json for 30 days.
+caches carry over between nights.
 
 ## packaging
 
-[`packaging/terra`](packaging/terra) has the spec, `anda.hcl` and
-`update.rhai` for Terra. it builds offline against Fedora's Haskell
-libraries with `%ghc_bin_build`, runs the test suite in `%check`, and ships
-one self-contained binary. CI builds it in a clean Fedora on every push. the
-spec's `Source0` expects a `v<version>` tag on GitHub.
+built the same way as anda itself. [`anda.hcl`](anda.hcl) has two projects:
+
+| project | spec | builds |
+|---|---|---|
+| `oglyad` | [`oglyad.spec`](oglyad.spec) | the `v<version>` release tag |
+| `oglyad-git` | [`oglyad-git.spec`](oglyad-git.spec) | the checked-out commit, versioned `<version>^<date>.<commit>` |
+
+```sh
+anda build oglyad-git --package rpm -c terra-45-x86_64
+```
+
+both build in mock, offline, against Fedora's Haskell libraries with
+`%ghc_bin_build`, run the test suite in `%check`, and ship one self-contained
+binary. [`package-git.yml`](.github/workflows/package-git.yml) builds
+`oglyad-git` on x86_64 and aarch64 for every push to main and every pull
+request that touches the code.
 
 ## formatting
 

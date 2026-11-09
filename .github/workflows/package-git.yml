@@ -1,0 +1,37 @@
+name: Package Git build
+
+permissions:
+  contents: read
+on:
+  push:
+    branches: [main]
+  pull_request:
+    paths:
+      - "oglyad-git.spec"
+      - "oglyad.cabal"
+      - "anda.hcl"
+      - "app/**"
+      - "src/**"
+      - "test/**"
+  workflow_dispatch:
+jobs:
+  anda:
+    strategy:
+      matrix:
+        version: ["f45"]
+        arch: ["x86_64", "aarch64"]
+      fail-fast: false
+    runs-on: ${{ matrix.arch == 'aarch64' && 'ubuntu-24.04-arm' || 'ubuntu-latest' }}
+    container:
+      image: ghcr.io/terrapkg/builder:${{ matrix.version }}
+      options: --cap-add=SYS_ADMIN --privileged
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Build oglyad
+        uses: FyraLabs/anda-build@main
+        with:
+          name: "oglyad-git"
+          mockConfig: terra-45-${{ matrix.arch }}

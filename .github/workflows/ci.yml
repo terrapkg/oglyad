@@ -28,8 +28,7 @@ jobs:
 
       # not haskell-actions/run-ormolu: v21 downloads from the old
       # mrkkrp/ormolu repo, which is gone, and reports the 404 as
-      # "unformatted files". gh downloads through the authenticated api, so
-      # it also isn't hit by anonymous-download throttling on github.com
+      # "unformatted files"
       - name: Install ormolu
         env:
           GH_TOKEN: ${{ github.token }}
@@ -47,92 +46,29 @@ jobs:
   build:
     name: build and test
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - uses: haskell-actions/setup@0f8e8c99d88aeb3fbfd523f1ef2c6f762d10d64d # v2.12.1
-        id: setup
-        with:
-          # keep in sync with what ghcup has set locally
-          ghc-version: "9.10.3"
-          cabal-version: "3.16.1.0"
-          cabal-update: true
-
-      # zlib for http-client's compression support. the tests run the same
-      # tools oglyad does: rpm for macro fingerprints, and the decompressors
-      - name: Install system packages
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zlib1g-dev rpm zstd xz-utils gzip
-
-      # warnings fail CI but stay warnings locally. cabal.project.local is
-      # gitignored, so this never leaks into anyone's checkout
-      - name: Configure
-        run: |
-          printf 'package oglyad\n  ghc-options: -Werror\n' > cabal.project.local
-          cabal configure --enable-tests
-          cabal build all --dry-run
-
-      # dist-newstyle/cache/plan.json pins every dependency version, so it
-      # makes an exact cache key for the cabal store
-      - name: Restore cabal store
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        id: cache
-        with:
-          path: ${{ steps.setup.outputs.cabal-store }}
-          key: ${{ runner.os }}-ghc-${{ steps.setup.outputs.ghc-version }}-${{ hashFiles('dist-newstyle/cache/plan.json') }}
-          restore-keys: ${{ runner.os }}-ghc-${{ steps.setup.outputs.ghc-version }}-
-
-      - name: Build dependencies
-        run: cabal build all --only-dependencies
-
-      # saved right after the dependencies build, so a failure in oglyad itself
-      # doesn't throw away the expensive part
-      - name: Save cabal store
-        if: steps.cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: ${{ steps.setup.outputs.cabal-store }}
-          key: ${{ steps.cache.outputs.cache-primary-key }}
-
-      - name: Build
-        run: cabal build all
-
-      - name: Test
-        run: cabal test all --test-show-details=direct
-
-      # upper bounds matter for libraries on Hackage. oglyad is an app with a
-      # pinned index-state, so they'd just be busywork
-      - name: Check the package
-        run: cabal check --ignore=missing-upper-bounds
-
-  # builds the Terra package from this commit in a clean Fedora, offline,
-  # against Fedora's own Haskell libraries, with the test suite in %check
-  package:
-    name: terra package
-    runs-on: ubuntu-latest
     container:
-      image: ghcr.io/terrapkg/builder:45
+      image: ghcr.io/terrapkg/builder:f45
     steps:
-      - name: Install git
-        run: dnf5 -y -q install git-core rpm-build dnf5-plugins
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
 
-      - name: Build the RPM
+      - name: Install dependencies
         run: |
-          git config --global --add safe.directory "$PWD"
-          version=$(rpmspec -q --srpm --qf '%{version}' packaging/terra/oglyad.spec)
-          git archive --prefix="oglyad-$version/" -o "$RUNNER_TEMP/oglyad-$version.tar.gz" HEAD
-          dnf5 -y -q builddep packaging/terra/oglyad.spec
-          # build as a regular user, like a real package build. the test
-          # suite in %check makes git repos and reads ~/.rpmmacros
-          useradd -m builder
-          cp packaging/terra/oglyad.spec "$RUNNER_TEMP/"
-          chown -R builder "$RUNNER_TEMP"
-          su builder -c "rpmbuild -ba --define '_sourcedir $RUNNER_TEMP' --define '_topdir $RUNNER_TEMP/rpmbuild' $RUNNER_TEMP/oglyad.spec"
+          dnf5 -y -q install cabal-install
+          dnf5 -y -q builddep oglyad.spec
 
-      - name: Install and run it
+      - name: Configure
         run: |
-          dnf5 -y -q install "$RUNNER_TEMP"/rpmbuild/RPMS/*/oglyad-*.rpm
-          oglyad --version
+          : > "$RUNNER_TEMP/cabal-config"
+          echo "CABAL_CONFIG=$RUNNER_TEMP/cabal-config" >> "$GITHUB_ENV"
+          printf 'package oglyad\n  ghc-options: -Werror\n' > cabal.project.local
+
+      - name: Build
+        run: cabal build all --enable-tests
+
+      - name: Test
+        run: cabal test all --test-show-details=direct
+
+      - name: Check the package
+        run: cabal check --ignore=missing-upper-bounds

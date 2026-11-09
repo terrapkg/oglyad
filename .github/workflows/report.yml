@@ -17,16 +17,22 @@ concurrency:
 jobs:
   report:
     runs-on: ubuntu-latest
-    # Terra's own build image, so specs evaluate with exactly the macros
-    # Terra builds with (anda-srpm-macros and friends)
     container:
       image: ghcr.io/terrapkg/builder:f45
+      # mock needs these to build oglyad in a chroot
+      options: --cap-add=SYS_ADMIN --privileged
     timeout-minutes: 60
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build oglyad
+        uses: FyraLabs/anda-build@52228d9412072bc6acaa634f80f065c19fcef608 # main
         with:
-          path: oglyad
-          persist-credentials: false
+          name: "oglyad-git"
+          mockConfig: terra-45-x86_64
+
+      - name: Install oglyad
+        run: |
+          dnf5 -y -q install $(find anda-build/rpm -name 'oglyad-*.rpm' ! -name '*.src.rpm')
+          oglyad --version
 
       # full history, since stale-build findings use each package's last commit
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -36,7 +42,6 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      # the container runs as root over checkouts owned by the runner user
       - name: Trust the checkouts
         run: git config --global --add safe.directory '*'
 
@@ -45,21 +50,6 @@ jobs:
       # this those specs show up as false rpmspec errors
       - name: Install buildsystem macros
         run: dnf5 -y -q install meson
-
-      # build oglyad the way Terra packages it, which also proves every night
-      # that the spec still builds against Fedora's Haskell libraries
-      - name: Build and install oglyad
-        working-directory: oglyad
-        run: |
-          version=$(rpmspec -q --srpm --qf '%{version}' packaging/terra/oglyad.spec)
-          git archive --prefix="oglyad-$version/" -o "$RUNNER_TEMP/oglyad-$version.tar.gz" HEAD
-          dnf5 -y -q builddep -D '_without_tests 1' packaging/terra/oglyad.spec
-          rpmbuild -bb --without tests \
-            --define "_sourcedir $RUNNER_TEMP" \
-            --define "_topdir $RUNNER_TEMP/rpmbuild" \
-            packaging/terra/oglyad.spec
-          dnf5 -y -q install "$RUNNER_TEMP"/rpmbuild/RPMS/*/oglyad-*.rpm
-          oglyad --version
 
       # spec evaluations, repodata and upstream answers carry over between
       # nights, so most runs only re-evaluate what changed
@@ -76,7 +66,7 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ github.token }}
         run: |
-          common=(-m packages -u --fedora -v --ignore-file oglyad/ignores.json --fail-on never)
+          common=(-m packages -u --fedora -v --ignore-file ignores.json --fail-on never)
           oglyad "${common[@]}" --format markdown > report.md
           oglyad "${common[@]}" --format json > report.json
           cat report.md >> "$GITHUB_STEP_SUMMARY"
