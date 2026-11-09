@@ -20,7 +20,7 @@ jobs:
     # Terra's own build image, so specs evaluate with exactly the macros
     # Terra builds with (anda-srpm-macros and friends)
     container:
-      image: ghcr.io/terrapkg/builder:f44
+      image: ghcr.io/terrapkg/builder:f45
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
