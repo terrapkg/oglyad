@@ -1,6 +1,6 @@
 # changelog
 
-## unreleased
+## 0.1.2.0
 
 - checks every maintained release by default (today f43, f44, f45 and
   rawhide), as listed by Fedora's Bodhi. `-r`/`--release` takes `43`, `f43`
