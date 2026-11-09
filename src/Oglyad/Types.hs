@@ -64,6 +64,9 @@ data UpstreamSource
     Derived Text
   | -- | follows a branch head (gh_commit and friends), no version to compare
     CommitTracked
+  | -- | never sets anything the spec's Version: is built from. it only bumps
+    -- Release (say, to rebuild when something else changes) or writes files
+    NoVersion
   | -- | raw update.rhai we couldn't make sense of
     Unknown Text
   deriving stock (Eq, Ord, Show, Read, Generic)
@@ -84,6 +87,14 @@ data Package = Package
     pkgPath :: FilePath,
     -- | Terra subrepo from anda.hcl labels, e.g. "extras"
     pkgSubrepo :: Maybe Text,
+    -- | a `nightly` or `quaterdaily` label in anda.hcl: built from a branch
+    -- head on a schedule, not from releases
+    pkgNightly :: Bool,
+    -- | the spec file, relative to the tree it was read from
+    pkgSpecPath :: Maybe FilePath,
+    -- | hash of everything in the package dir that can change what rpmspec
+    -- says, plus the dist and macros. keys caches of anda runs
+    pkgFingerprint :: Text,
     -- | what's merged in git
     pkgSpecEVR :: Maybe EVR,
     -- | what's actually published
@@ -91,6 +102,8 @@ data Package = Package
     pkgLastCommit :: Maybe UTCTime,
     -- | Nothing means no update.rhai
     pkgUpstream :: Maybe UpstreamSource,
+    -- | the update.rhai itself, for replaying it against the upstream value
+    pkgRhai :: Maybe Text,
     -- | only filled in when upstream lookups ran
     pkgUpstreamVer :: Maybe Text,
     -- | why the upstream lookup failed, if it did
@@ -117,7 +130,10 @@ data Finding = Finding
     -- (see the duplicate-name check), so this is what identifies it
     fPath :: Maybe Text,
     fSeverity :: Severity,
-    fMessage :: Text
+    fMessage :: Text,
+    -- | the releases this showed up in, by name ("43", "rawhide"). empty
+    -- until the run stamps it
+    fReleases :: [Text]
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
@@ -130,25 +146,36 @@ finding check p sev msg =
       fPackage = pkgName p,
       fPath = Just (T.pack (pkgPath p)),
       fSeverity = sev,
-      fMessage = msg
+      fMessage = msg,
+      fReleases = []
     }
 
 data Config = Config
   { -- | local checkout of terrapkg/packages
     cfgMonorepo :: FilePath,
+    -- | git ref to read specs from, e.g. origin/f43. Nothing reads the
+    -- working tree of cfgMonorepo as it is
+    cfgSpecRef :: Maybe Text,
+    -- | the terrapkg/packages branch name, f43 or frawhide. update.rhai
+    -- scripts see it as labels.branch
+    cfgBranch :: Text,
     -- | e.g. https://repos.fyralabs.com/terra44
     cfgTerraRepo :: Text,
     -- | repo base urls to check for overlap
     cfgFedoraRepos :: [Text],
-    -- | %{dist} used when evaluating specs, e.g. .fc44
-    -- | Fedora/Terra release number, e.g. 44
+    -- | Fedora/Terra release number, e.g. 44. rawhide has one too
     cfgRelease :: Int,
+    -- | %{dist} used when evaluating specs, e.g. .fc44 or .fcrawhide
     cfgDist :: Text,
     cfgStaleAfter :: NominalDiffTime,
     -- | whether to hit upstream APIs at all
     cfgUpstream :: Bool,
     -- | reuse cached upstream answers younger than this
     cfgCacheFor :: NominalDiffTime,
+    -- | when this oglyad run started. upstream answers fetched since then are
+    -- reused whatever cfgCacheFor says, so checking four releases asks each
+    -- upstream once
+    cfgRunStart :: UTCTime,
     -- | parallel jobs, defaults to the number of cores
     cfgConcurrency :: Int,
     cfgGitHubToken :: Maybe Text

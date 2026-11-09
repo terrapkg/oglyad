@@ -14,8 +14,11 @@
 -- 'Unknown', and the unparsed-rhai check lists those
 module Oglyad.Source.Rhai
   ( parseUpdateRhai,
+    parseUpdateRhaiWith,
     Token (..),
     tokenize,
+    sourceCall,
+    balanced,
   )
 where
 
@@ -35,17 +38,34 @@ data Token
   | TStr Text
   | TNum Text
   | TSym Char
+  | -- | a backtick string with ${...} in it, which Rhai interpolates
+    TTmpl Text
   deriving stock (Eq, Show)
 
 type Parser = Parsec Void Text
 
 parseUpdateRhai :: Text -> UpstreamSource
-parseUpdateRhai src = case tokenize src of
+parseUpdateRhai = parseUpdateRhaiWith Nothing
+
+-- | like 'parseUpdateRhai', also knowing which macros the spec's Version:
+-- line uses (see 'Oglyad.Source.Monorepo.versionMacros'). a script that
+-- sets none of them, and not ver or version either, doesn't track an
+-- upstream version at all
+parseUpdateRhaiWith :: Maybe [Text] -> Text -> UpstreamSource
+parseUpdateRhaiWith macros src = case tokenize src of
   Nothing -> Unknown (T.strip src)
   Just toks -> case resolveVersion toks of
     Just s -> s
     Nothing
       | hasCommitCall toks -> CommitTracked
+      -- a commit from somewhere else, like get(...).json().sha. only when
+      -- the script sets no version, since plenty record the commit of the
+      -- release they just scraped
+      | null (versionExprs toks), not (null (globalExprs ["commit"] toks)) -> CommitTracked
+      | Just ms <- macros,
+        null (versionExprs toks),
+        null (globalExprs ms toks) ->
+          NoVersion
       -- no rpm.version we could follow, but the script only ever calls one
       -- source helper, so that's almost certainly it
       | [s] <- nub (allSources toks) -> s
@@ -64,15 +84,16 @@ tokenP =
   L.lexeme sc $
     choice
       [ TStr <$> quoted '"',
-        TStr <$> raw, -- template strings, ${} left as-is
+        raw,
         TStr <$> quoted '\'', -- char literals
         TIdent <$> takeWhile1P (Just "identifier") (\c -> isAlphaNum c || c == '_'),
         TNum <$> takeWhile1P (Just "number") isDigit,
         TSym <$> satisfy (not . isSpace)
       ]
   where
-    -- backtick strings are raw in Rhai, so regexes like `[\d.]+` stay intact
-    raw = char '`' *> takeWhileP Nothing (/= '`') <* char '`'
+    -- backtick strings are raw in Rhai, so regexes like `[\d.]+` stay intact.
+    -- they interpolate ${...} though, so those get their own token
+    raw = (\t -> if "${" `T.isInfixOf` t then TTmpl t else TStr t) <$> (char '`' *> takeWhileP Nothing (/= '`') <* char '`')
     -- in quoted strings a backslash escapes whatever follows it. we only care
     -- about the text being roughly right, so unknown escapes are kept as-is
     quoted q = T.pack <$> (char q *> manyTill (escaped <|> anySingle) (char q))
@@ -82,6 +103,21 @@ tokenP =
       't' -> '\t'
       c -> c
 
+-- | do the brackets pair up? Rhai won't run a script where they don't, so
+-- this catches a broken update.rhai without a real parser
+balanced :: [Token] -> Bool
+balanced = go []
+  where
+    go stack = \case
+      [] -> null stack
+      TSym c : ts
+        | Just close <- lookup c pairs -> go (close : stack) ts
+        | c `elem` (")]}" :: String) -> case stack of
+            s : rest | s == c -> go rest ts
+            _ -> False
+      _ : ts -> go stack ts
+    pairs = [('(', ')'), ('[', ']'), ('{', '}')]
+
 -- * analysis
 
 -- | follow rpm.version(...) / rpm.global("ver", ...) back to a source helper
@@ -90,20 +126,24 @@ resolveVersion toks = listToMaybe (mapMaybe (resolveExpr toks 5) (versionExprs t
 
 -- | every expression handed to something that sets the package version
 versionExprs :: [Token] -> [[Token]]
-versionExprs = \case
+versionExprs toks = go toks <> globalExprs ["ver", "version"] toks
+  where
+    go = \case
+      [] -> []
+      -- rpm.version(EXPR)
+      TIdent "rpm" : TSym '.' : TIdent "version" : TSym '(' : rest -> takeBalanced rest : go rest
+      _ : rest -> go rest
+
+-- | every expression a script hands to rpm.global(KEY, ...) or
+-- rpm.define(KEY, ...) for one of these keys
+globalExprs :: [Text] -> [Token] -> [[Token]]
+globalExprs keys = \case
   [] -> []
-  TIdent "rpm" : TSym '.' : TIdent "version" : TSym '(' : rest ->
-    argsOf rest <> versionExprs rest
   TIdent "rpm" : TSym '.' : TIdent f : TSym '(' : TStr key : TSym ',' : rest
     | f `elem` ["global", "define"],
-      key `elem` ["ver", "version"] ->
-        argsOf' rest <> versionExprs rest
-  _ : rest -> versionExprs rest
-  where
-    -- rpm.version(EXPR)
-    argsOf rest = [takeBalanced rest]
-    -- rpm.global("ver", EXPR), we're already past the comma
-    argsOf' rest = [takeBalanced rest]
+      key `elem` keys ->
+        takeBalanced rest : globalExprs keys rest
+  _ : rest -> globalExprs keys rest
 
 -- | tokens up to the ')' that closes the call we're inside
 takeBalanced :: [Token] -> [Token]
@@ -128,6 +168,12 @@ resolveExpr toks fuel expr
       -- bump::madoguchi(...) or nvidia::nvidia_driver_version()
       TIdent m : TSym ':' : TSym ':' : TIdent f : TSym '(' : _ -> Just (Derived (m <> "::" <> f))
       TIdent f : TSym '(' : _ | f `elem` derivedHelpers -> Just (Derived f)
+      -- kmod packages copy Version from their kmod-common sibling with
+      -- sh("cat anda/.../x.spec | grep Version ...")
+      TIdent "sh" : TSym '(' : TStr cmd : _
+        | "cat " `T.isPrefixOf` T.stripStart cmd,
+          ".spec" `T.isInfixOf` cmd ->
+            Just (Derived "another spec in the repo")
       -- some other call like find(`regex`, tag, 1): the version comes from
       -- whichever argument we can trace back to a source
       TIdent _ : TSym '(' : rest ->

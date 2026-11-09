@@ -1,7 +1,8 @@
 -- | small json caches under $XDG_CACHE_HOME/oglyad, so reruns skip work that
 -- can't have changed: spec evaluation, repodata parsing and upstream lookups
 module Oglyad.Source.Cache
-  ( loadJson,
+  ( cacheDir,
+    loadJson,
     saveJson,
     CacheEntry (..),
     UpstreamCache,

@@ -16,10 +16,12 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime, diffUTCTime, getCurrentTime, nominalDay)
 import Oglyad.App (App, Env (..), HttpError (..), forConcurrentlyN, note)
+import Oglyad.Source.Anda (projectNames, updateProject, withScratchCopy)
 import Oglyad.Source.Cache (CacheEntry (..), UpstreamCache, loadJson, lookupFresh, saveJson)
 import Oglyad.Source.Monorepo
 import Oglyad.Source.Repodata (fetchRepo)
-import Oglyad.Source.Rhai (parseUpdateRhai)
+import Oglyad.Source.Rhai (parseUpdateRhaiWith, tokenize)
+import Oglyad.Source.RhaiEval (Simulated (..), simulateVersion)
 import Oglyad.Source.Upstream (latestVersion)
 import Oglyad.Types
 import System.Directory (findExecutable, makeAbsolute)
@@ -34,8 +36,15 @@ buildSnapshot :: App (Snapshot, [Finding])
 buildSnapshot = do
   cfg@Config {..} <- asks envConfig
   now <- liftIO getCurrentTime
-  (dirErrs, dirs) <- partitionEithers <$> liftIO (findPackageDirs cfgMonorepo)
-  hd <- liftIO (headCommit cfgMonorepo)
+  -- specs come from a release branch extracted into the cache, or straight
+  -- from the working tree with --worktree
+  tree <- liftIO $ case cfgSpecRef of
+    Nothing -> Right . (cfgMonorepo,"HEAD",) <$> headCommit cfgMonorepo
+    Just ref -> fmap (\(dir, sha) -> (dir, sha, Just sha)) <$> checkoutRef cfgMonorepo ref
+  let (root, logRef, hd, treeErrs) = case tree of
+        Right (r, l, h) -> (Just r, l, h, [])
+        Left err -> (Nothing, "HEAD", Nothing, [collectErr (maybe "monorepo" id cfgSpecRef) err])
+  (dirErrs, dirs) <- partitionEithers <$> liftIO (maybe (pure []) findPackageDirs root)
 
   -- the main repo, every subrepo some package asked for, and Fedora
   let terraRepos =
@@ -45,7 +54,7 @@ buildSnapshot = do
   ((specErrs, pkgs0), (terra, fedora)) <-
     liftIO $
       concurrently
-        (runReaderT (readPackages dirs) env)
+        (runReaderT (readPackages (maybe cfgMonorepo id root) logRef hd dirs) env)
         (runReaderT (fetchRepos terraRepos cfgFedoraRepos) env)
 
   let (repoErrs, repos) = partitionEithers terra
@@ -57,7 +66,10 @@ buildSnapshot = do
             }
         | p <- pkgs0
         ]
-  (upErrs, pkgs) <- if cfgUpstream then withUpstreams now pkgs1 else pure ([], pkgs1)
+  (upErrs, pkgs2) <- if cfgUpstream then withUpstreams now pkgs1 else pure ([], pkgs1)
+  (andaErrs, pkgs) <- case root of
+    Just r | cfgUpstream -> withAnda r now pkgs2
+    _ -> pure ([], pkgs2)
 
   let snap =
         Snapshot
@@ -72,7 +84,7 @@ buildSnapshot = do
         [ (collectErr (T.pack path) ("can't read package dir: " <> err)) {fPath = Just (T.pack path)}
         | (path, err) <- dirErrs
         ]
-  pure (snap, unreadable <> specErrs <> repoErrs <> upErrs)
+  pure (snap, treeErrs <> unreadable <> specErrs <> repoErrs <> upErrs <> andaErrs)
 
 -- | every repo at once. Terra failures become findings, Fedora ones just mean
 -- no overlap data
@@ -87,18 +99,19 @@ fetchRepos terraRepos fedoraRepos = do
     Right url -> Right . either (const Map.empty) id <$> fetchRepo url
   pure (partitionEithers results)
 
--- | evaluate every spec, reusing cached evaluations for unchanged packages
-readPackages :: [PkgDir] -> App ([Finding], [Package])
-readPackages dirs = do
+-- | evaluate every spec under root, reusing cached evaluations for unchanged
+-- packages. logRef and hd say which commit's history to read commit times from
+readPackages :: FilePath -> Text -> Maybe Text -> [PkgDir] -> App ([Finding], [Package])
+readPackages root0 logRef hd dirs = do
   Config {..} <- asks envConfig
-  root <- liftIO (makeAbsolute cfgMonorepo)
+  root <- liftIO (makeAbsolute root0)
   -- one cache file per dist, so cron jobs checking different releases don't
   -- keep evicting each other's entries
   let cacheFile = "specs" <> T.unpack cfgDist <> ".json"
   (commits, (macros, cache)) <-
     liftIO $
       concurrently
-        (commitTimes cfgMonorepo (map pdPath dirs))
+        (commitTimes cfgMonorepo logRef hd cfgDist (map pdPath dirs))
         ((,) <$> macroFingerprint <*> (fromMaybe Map.empty <$> loadJson cacheFile))
   keyed <- forConcurrentlyN cfgConcurrency dirs $ \d -> liftIO $ do
     key <- specFingerprint macros cfgDist root (pdPath d)
@@ -124,8 +137,8 @@ readPackages dirs = do
         ]
       (errs, pkgs) =
         partitionEithers $
-          [toPackage commits d (Just i) | Evaluated _ d i <- results]
-            <> [toPackage commits d Nothing | NoSpec d <- results]
+          [toPackage commits k d (Just i) | Evaluated k d i <- results]
+            <> [toPackage commits "" d Nothing | NoSpec d <- results]
   pure (missing <> errs, pkgs)
 
 -- | what happened to one package dir's spec
@@ -134,21 +147,22 @@ data SpecResult
   | NoSpec PkgDir
   | Skipped
 
--- | last commit per package dir, reused as long as HEAD hasn't moved.
--- uncommitted changes can't change any "last commit", so HEAD is the whole key
-commitTimes :: FilePath -> [FilePath] -> IO (Map FilePath UTCTime)
-commitTimes root dirs = do
-  hd <- headCommit root
-  cached <- loadJson "commits.json"
+-- | last commit per package dir, reused as long as the commit hasn't moved.
+-- uncommitted changes can't change any "last commit", so the commit is the
+-- whole key. one cache file per dist, since each release reads its own branch
+commitTimes :: FilePath -> Text -> Maybe Text -> Text -> [FilePath] -> IO (Map FilePath UTCTime)
+commitTimes mono ref hd dist dirs = do
+  let file = "commits" <> T.unpack dist <> ".json"
+  cached <- loadJson file
   case (hd, cached) of
     (Just h, Just (h', m)) | h == h', all (`Map.member` m) dirs -> pure m
     _ -> do
-      m <- lastCommits root dirs
-      mapM_ (\h -> saveJson "commits.json" (h, m)) hd
+      m <- lastCommits mono ref dirs
+      mapM_ (\h -> saveJson file (h, m)) hd
       pure m
 
-toPackage :: Map FilePath UTCTime -> PkgDir -> Maybe (Either Text SpecInfo) -> Either Finding Package
-toPackage commits PkgDir {..} = \case
+toPackage :: Map FilePath UTCTime -> Text -> PkgDir -> Maybe (Either Text SpecInfo) -> Either Finding Package
+toPackage commits key PkgDir {..} = \case
   Nothing -> Left (pathErr "no spec file found")
   Just (Left err) -> Left (pathErr ("rpmspec failed: " <> firstLine err))
   Just (Right SpecInfo {..}) ->
@@ -157,16 +171,24 @@ toPackage commits PkgDir {..} = \case
         { pkgName = siName,
           pkgPath = pdPath,
           pkgSubrepo = pdSubrepo,
+          pkgNightly = pdNightly,
+          pkgSpecPath = pdSpec,
+          pkgFingerprint = key,
           pkgSpecEVR = Just siEVR,
           pkgRepoBuild = Nothing,
           pkgLastCommit = Map.lookup pdPath commits,
-          pkgUpstream = parseUpdateRhai <$> pdUpdateRhai,
+          -- an update.rhai with nothing but comments in it updates nothing
+          pkgUpstream = parseUpdateRhaiWith pdVersionMacros <$> (pdUpdateRhai >>= nonEmpty),
+          pkgRhai = pdUpdateRhai,
           pkgUpstreamVer = Nothing,
           pkgUpstreamErr = Nothing,
           pkgRepoChecked = False
         }
   where
     firstLine t = let l = T.takeWhile (/= '\n') t in if T.null l then "(no output)" else l
+    nonEmpty script = case tokenize script of
+      Just [] -> Nothing
+      _ -> Just script
     pathErr msg = (collectErr (T.pack pdPath) msg) {fPath = Just (T.pack pdPath)}
 
 -- | fill in upstream versions, from the cache when it's fresh enough.
@@ -181,7 +203,10 @@ withUpstreams now pkgs = do
     note "no GITHUB_TOKEN (or `gh auth token`), GitHub lookups will hit the 60/hour limit fast"
   cache <- liftIO (fromMaybe Map.empty <$> loadJson "upstream.json") :: App UpstreamCache
   let wanted = [p | p <- pkgs, Just src <- [pkgUpstream p], lookable src]
-      fresh p = pkgUpstream p >>= \src -> lookupFresh cfgCacheFor now src cache
+      -- anything fetched since this run started is fresh, so checking several
+      -- releases asks each upstream once even with --cache-hours 0
+      maxAge = max cfgCacheFor (diffUTCTime now cfgRunStart)
+      fresh p = pkgUpstream p >>= \src -> lookupFresh maxAge now src cache
       (crates, others) = partition (isCrates . pkgUpstream) wanted
       lookup1 p = case (fresh p, pkgUpstream p) of
         (Just e, _) -> pure (pkgPath p, either (Left . HttpFailed) Right (ceResult e))
@@ -219,7 +244,7 @@ withUpstreams now pkgs = do
   pure
     ( rateErr,
       [ case Map.lookup (pkgPath p) byPath of
-          Just (Right v) -> p {pkgUpstreamVer = Just v}
+          Just (Right v) -> p {pkgUpstreamVer = replay p v}
           Just (Left (HttpFailed e)) -> p {pkgUpstreamErr = Just e}
           -- rate limits are reported once above, not as a broken upstream
           Just (Left (RateLimited _)) -> p
@@ -228,8 +253,17 @@ withUpstreams now pkgs = do
       ]
     )
   where
+    -- run the script's guards and edits over the raw value, so a tag the
+    -- script would skip (or crop) doesn't show up as drift
+    replay p v = case (pkgUpstream p, pkgRhai p) of
+      (Just src, Just script) -> case simulateVersion src v script of
+        Sets v' -> Just v'
+        NoUpdate -> Nothing
+        CantTell -> Just v
+      _ -> Just v
     lookable = \case
       CommitTracked -> False
+      NoVersion -> False
       Derived _ -> False
       Unknown _ -> False
       _ -> True
@@ -237,5 +271,66 @@ withUpstreams now pkgs = do
       Just (Crates _ _) -> True
       _ -> False
 
+-- | run the real anda for scripts oglyad couldn't follow, on a throwaway
+-- copy of the tree, and read the Version it leaves in each spec. results are
+-- cached like upstream answers, keyed by the package's fingerprint
+withAnda :: FilePath -> UTCTime -> [Package] -> App ([Finding], [Package])
+withAnda root now pkgs = do
+  Config {..} <- asks envConfig
+  let wanted = [p | p@Package {pkgUpstream = Just (Unknown _), pkgSpecPath = Just _} <- pkgs]
+      cacheFile = "anda" <> T.unpack cfgDist <> ".json"
+      maxAge = max cfgCacheFor (diffUTCTime now cfgRunStart)
+  cache <- liftIO (fromMaybe Map.empty <$> loadJson cacheFile) :: App (Map Text CacheEntry)
+  let fresh p = case Map.lookup (pkgFingerprint p) cache of
+        Just e | diffUTCTime now (ceFetched e) <= maxAge -> Just e
+        _ -> Nothing
+      misses = [p | p <- wanted, isNothing (fresh p)]
+  hasAnda <- liftIO (isJust <$> findExecutable "anda")
+  (problems, ran) <-
+    if
+      | null misses -> pure ([], Map.empty)
+      | not hasAnda -> do
+          note ("anda not found, so " <> show (length misses) <> " update.rhai scripts oglyad can't follow are skipped")
+          pure ([], Map.empty)
+      | otherwise -> do
+          note ("running anda update for " <> show (length wanted) <> " scripts oglyad can't follow, " <> show (length wanted - length misses) <> " cached")
+          env <- ask
+          r <- liftIO $ withScratchCopy root $ \copy ->
+            projectNames copy >>= \case
+              Left e -> pure (Left e)
+              Right names -> fmap Right . flip runReaderT env . forConcurrentlyN cfgConcurrency misses $ \p ->
+                liftIO $
+                  (pkgPath p,) <$> case (Map.lookup (pkgPath p) names, pkgSpecPath p) of
+                    (Just name, Just spec) ->
+                      updateProject copy cfgGitHubToken cfgBranch name >>= \case
+                        Left e -> pure (Left e)
+                        Right () ->
+                          either (Left . ("rpmspec failed on the updated spec: " <>)) (Right . evrVersion . siEVR)
+                            <$> querySpec cfgRelease cfgDist (copy </> spec)
+                    _ -> pure (Left "anda doesn't list this project")
+          pure $ case join' r of
+            Left e -> ([(collectErr "anda" e) {fSeverity = Warn}], Map.empty)
+            Right xs -> ([], Map.fromList xs)
+  let answer p = maybe (Map.lookup (pkgPath p) ran) (Just . ceResult) (fresh p)
+      new =
+        Map.fromList
+          [ (pkgFingerprint p, CacheEntry now (Right v))
+          | p <- misses,
+            Just (Right v) <- [Map.lookup (pkgPath p) ran]
+          ]
+      recent = Map.filter (\e -> diffUTCTime now (ceFetched e) < 30 * nominalDay) cache
+  liftIO (saveJson cacheFile (new <> recent))
+  pure
+    ( problems,
+      [ case answer p of
+          Just (Right v) -> p {pkgUpstreamVer = Just v}
+          Just (Left e) -> p {pkgUpstreamErr = Just ("update.rhai failed under anda: " <> e)}
+          Nothing -> p
+      | p <- pkgs
+      ]
+    )
+  where
+    join' = either Left id
+
 collectErr :: Text -> Text -> Finding
-collectErr what msg = Finding {fCheck = "collect", fPackage = what, fPath = Nothing, fSeverity = Error, fMessage = msg}
+collectErr what msg = Finding {fCheck = "collect", fPackage = what, fPath = Nothing, fSeverity = Error, fMessage = msg, fReleases = []}

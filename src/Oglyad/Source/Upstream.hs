@@ -3,6 +3,7 @@
 -- so oglyad sees exactly what `anda update` would see
 module Oglyad.Source.Upstream
   ( latestVersion,
+    isSemver,
   )
 where
 
@@ -11,6 +12,7 @@ import Data.Aeson (Value (..), eitherDecode)
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
 import Data.Bifunctor (first)
+import Data.Char (isAlphaNum, isDigit)
 import Data.List (maximumBy)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -47,6 +49,7 @@ latestVersion = \case
   GitTags url -> first HttpFailed <$> liftIO (gitTags url)
   Derived how -> pure (Left (HttpFailed ("follows " <> how <> ", not an upstream release")))
   CommitTracked -> pure (Left (HttpFailed "tracks a commit, not a version"))
+  NoVersion -> pure (Left (HttpFailed "doesn't set a version"))
   Unknown _ -> pure (Left (HttpFailed "unparsed update.rhai"))
   where
     crateKey = \case
@@ -71,7 +74,8 @@ walk (I i : rest) (Array a) = a V.!? i >>= walk rest
 walk _ _ = Nothing
 
 -- | opam has no "latest" endpoint. anda lists the package's directory in
--- ocaml/opam-repository and picks the highest `name.version` entry
+-- ocaml/opam-repository and picks the highest `name.version` entry that
+-- parses as semver, which skips old schemes like Jane Street's 113.24.00
 opam :: Text -> App (Either HttpError Text)
 opam name = do
   let url = "https://api.github.com/repos/ocaml/opam-repository/contents/packages/" <> name
@@ -83,12 +87,29 @@ opam name = do
             [ ver
             | Object o <- V.toList entries,
               Just (String n) <- [KM.lookup "name" o],
-              Just ver <- [T.stripPrefix (name <> ".") n]
+              Just ver <- [T.stripPrefix (name <> ".") n],
+              isSemver ver
             ]
           _ -> []
     case versions of
       [] -> Left (HttpFailed ("no versions listed at " <> url))
-      _ -> Right (maximumBy rpmvercmp versions)
+      _ -> Right (maximumBy (\a b -> rpmvercmp (normalizeVersion a) (normalizeVersion b)) versions)
+
+-- | does this parse with the semver crate after anda's opam cleanup (leading
+-- v's dropped, '~' read as '-')? MAJOR.MINOR.PATCH with no leading zeros,
+-- then an optional -prerelease and +build
+isSemver :: Text -> Bool
+isSemver raw =
+  let v = T.replace "~" "-" (T.dropWhile (== 'v') raw)
+      (noBuild, build) = T.breakOn "+" v
+      (core, pre) = T.breakOn "-" noBuild
+      numeric p = not (T.null p) && T.all isDigit p && (p == "0" || T.head p /= '0')
+      ident p = not (T.null p) && T.all (\c -> isAlphaNum c || c == '-') p
+      preIdent p = ident p && (not (T.all isDigit p) || numeric p)
+      idents f t = T.null t || all f (T.splitOn "." (T.drop 1 t))
+   in case T.splitOn "." core of
+        [a, b, c] -> all numeric [a, b, c] && idents preIdent pre && idents ident build
+        _ -> False
 
 -- | newest tag on a git remote, for forges without a releases api.
 -- `git ls-remote` speaks the smart http protocol, so nothing gets cloned

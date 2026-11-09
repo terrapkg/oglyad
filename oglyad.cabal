@@ -68,11 +68,15 @@ common modules
     Oglyad.Collect
     Oglyad.Ignore
     Oglyad.Process
+    Oglyad.Regex
+    Oglyad.Release
     Oglyad.Report
+    Oglyad.Source.Anda
     Oglyad.Source.Cache
     Oglyad.Source.Monorepo
     Oglyad.Source.Repodata
     Oglyad.Source.Rhai
+    Oglyad.Source.RhaiEval
     Oglyad.Source.Upstream
     Oglyad.Types
     Oglyad.Version

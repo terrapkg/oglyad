@@ -2,6 +2,7 @@
 -- GitHub job summaries
 module Oglyad.Report
   ( Report (..),
+    ReleaseInfo (..),
     Format (..),
     render,
     renderText,
@@ -29,11 +30,23 @@ data Format = Text | Json | Markdown
 data Report = Report
   { rVersion :: Text,
     rGenerated :: UTCTime,
-    rMonorepoHead :: Maybe Text,
-    rTerraRepo :: Text,
+    -- | every release this run checked, in order
+    rReleases :: [ReleaseInfo],
     rUpstream :: Bool,
     rFindings :: [Finding],
     rIgnored :: [Finding]
+  }
+
+-- | what one release was checked against
+data ReleaseInfo = ReleaseInfo
+  { -- | "43", "rawhide", as findings' fReleases spell it
+    riName :: Text,
+    -- | "f43", "rawhide", for people
+    riLabel :: Text,
+    -- | the git ref the specs came from, Nothing for the working tree
+    riRef :: Maybe Text,
+    riCommit :: Maybe Text,
+    riTerraRepo :: Text
   }
 
 render :: Format -> Severity -> Report -> LBS.ByteString
@@ -47,7 +60,7 @@ render fmt minSev r = case fmt of
 -- * text
 
 renderText :: Severity -> Report -> Text
-renderText minSev Report {..} =
+renderText minSev r@Report {..} =
   T.unlines (map line (shown minSev rFindings) <> ["", summaryLine rFindings rIgnored])
   where
     amb = ambiguousNames rFindings
@@ -55,6 +68,7 @@ renderText minSev Report {..} =
       T.justifyLeft 6 ' ' (sevText fSeverity)
         <> T.justifyLeft 16 ' ' fCheck
         <> label amb f
+        <> releaseTag r f
         <> ": "
         <> fMessage
 
@@ -73,11 +87,19 @@ renderJson :: Report -> LBS.ByteString
 renderJson Report {..} =
   encode $
     object
-      [ "schema" .= (1 :: Int),
+      [ "schema" .= (2 :: Int),
         "oglyad" .= rVersion,
         "generated" .= rGenerated,
-        "monorepo_head" .= rMonorepoHead,
-        "terra_repo" .= rTerraRepo,
+        "releases"
+          .= [ object
+                 [ "release" .= riName,
+                   "label" .= riLabel,
+                   "ref" .= riRef,
+                   "commit" .= riCommit,
+                   "terra_repo" .= riTerraRepo
+                 ]
+             | ReleaseInfo {..} <- rReleases
+             ],
         "upstream" .= rUpstream,
         "summary"
           .= object
@@ -97,7 +119,8 @@ renderJson Report {..} =
           "package" .= fPackage,
           "path" .= fPath,
           "severity" .= toJSON fSeverity,
-          "message" .= fMessage
+          "message" .= fMessage,
+          "releases" .= fReleases
         ]
 
 -- * markdown
@@ -105,18 +128,20 @@ renderJson Report {..} =
 -- | sized for a GitHub job summary: counts first, errors and warnings in
 -- full, info folded away
 renderMarkdown :: Severity -> Report -> Text
-renderMarkdown minSev Report {..} =
+renderMarkdown minSev r@Report {..} =
   T.unlines $
     [ "# oglyad report",
       "",
       T.intercalate
         " · "
-        [ T.pack (formatTime defaultTimeLocale "%Y-%m-%d %H:%M UTC" rGenerated),
-          "terrapkg/packages " <> maybe "(unknown commit)" (\h -> "`" <> T.take 10 h <> "`") rMonorepoHead,
-          rTerraRepo,
-          if rUpstream then "upstream checks on" else "upstream checks off",
-          "oglyad " <> rVersion
-        ],
+        ( [T.pack (formatTime defaultTimeLocale "%Y-%m-%d %H:%M UTC" rGenerated)]
+            <> [ riLabel <> " " <> maybe "(unknown commit)" (\h -> "`" <> T.take 10 h <> "`") riCommit
+               | ReleaseInfo {..} <- rReleases
+               ]
+            <> [ if rUpstream then "upstream checks on" else "upstream checks off",
+                 "oglyad " <> rVersion
+               ]
+        ),
       "",
       "**" <> summaryLine rFindings rIgnored <> "**",
       "",
@@ -139,7 +164,7 @@ renderMarkdown minSev Report {..} =
           let heading = title <> " (" <> tshow (length fs) <> ")"
               table =
                 ["", "| package | check | message |", "|---|---|---|"]
-                  <> [ "| " <> cell (label amb f) <> " | `" <> fCheck f <> "` | " <> cell (fMessage f) <> " |"
+                  <> [ "| " <> cell (label amb f <> releaseTag r f) <> " | `" <> fCheck f <> "` | " <> cell (fMessage f) <> " |"
                      | f <- fs
                      ]
            in if folded
@@ -158,6 +183,14 @@ shown minSev =
 label :: Set.Set Text -> Finding -> Text
 label ambiguous Finding {..} =
   fPackage <> maybe "" (\path -> if fPackage `Set.member` ambiguous then " (" <> path <> ")" else "") fPath
+
+-- | " [f43, f44]" for a finding that only some of the checked releases
+-- have. nothing when it's in all of them, or only one release was checked
+releaseTag :: Report -> Finding -> Text
+releaseTag Report {rReleases} Finding {fReleases}
+  | length rReleases <= 1 = ""
+  | all (`elem` fReleases) (map riName rReleases) = ""
+  | otherwise = " [" <> T.intercalate ", " [riLabel ri | ri <- rReleases, riName ri `elem` fReleases] <> "]"
 
 -- | names that show up with more than one directory
 ambiguousNames :: [Finding] -> Set.Set Text

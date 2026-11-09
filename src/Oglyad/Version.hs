@@ -15,7 +15,8 @@ where
 
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Char (isAlphaNum, isAsciiLower, isAsciiUpper, isDigit)
-import Data.List (find)
+import Data.List (find, minimumBy)
+import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
@@ -142,14 +143,16 @@ tildePre t = case T.uncons t of
 -- ways packagers respell a version. returns how upstream compares to the spec
 --
 --   * same letters and digits, different punctuation is the same version
---     (0.4.2 vs 0.4~2, 2026.07.27 vs 20260727)
+--     (0.4.2 vs 0.4~2, 2026.07.27 vs 20260727). a snapshot suffix on the
+--     spec (^20260805git..., .gitfc62ae7) doesn't count, since a snapshot of
+--     the release upstream just tagged isn't behind it
 --   * the same leading dotted number with junk after it is the same version
 --     (2.005R vs 2.005, 3.17.0-ogc1 vs 3.17.0^1), unless one side is a
 --     prerelease, since 6.0.0 vs 6.0.0~alpha1 is real drift
 --   * otherwise rpmvercmp decides
 compareUpstream :: Text -> Text -> Ordering
 compareUpstream up spec
-  | squash u == squash s = EQ
+  | squash u == squash s || squash u == squash (snapshotBase s) = EQ
   | not (T.null (core u)) && core u == core s && not (isPre u || isPre s) = EQ
   | otherwise = rpmvercmp u s
   where
@@ -159,3 +162,14 @@ compareUpstream up spec
     core = T.dropWhileEnd (== '.') . T.takeWhile (\c -> isDigit c || c == '.')
     -- a prerelease is never "the same version with junk after it"
     isPre v = "~" `T.isPrefixOf` T.drop (T.length (core v)) (T.dropWhileEnd (== '.') v)
+
+-- | a version with its snapshot suffix cut off: everything from a '^', or
+-- from a git marker like ".git" or "~git"
+--
+-- >>> snapshotBase "2.0.0~alpha~1~20250926.gitfc62ae7"
+-- "2.0.0~alpha~1~20250926"
+snapshotBase :: Text -> Text
+snapshotBase v =
+  let base = T.takeWhile (/= '^') v
+      cuts = [pre | sep <- [".git", "~git", "+git", "_git"], let (pre, post) = T.breakOn sep base, not (T.null post)]
+   in minimumBy (comparing T.length) (base : cuts)

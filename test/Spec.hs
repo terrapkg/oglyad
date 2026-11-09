@@ -17,12 +17,18 @@ import Oglyad.Check.Drift qualified as Drift
 import Oglyad.Check.DuplicateName qualified as DuplicateName
 import Oglyad.Check.FedoraOverlap qualified as FedoraOverlap
 import Oglyad.Check.Stale qualified as Stale
+import Oglyad.Check.UnparsedRhai qualified as UnparsedRhai
 import Oglyad.Ignore
 import Oglyad.Process (childEnv, run)
-import Oglyad.Report (Report (..), renderJson, renderMarkdown, renderText)
-import Oglyad.Source.Monorepo (PkgDir (..), findPackageDirs, hclString, lastCommits, macroFingerprint, specFingerprint)
+import Oglyad.Regex qualified as Re
+import Oglyad.Release
+import Oglyad.Report (ReleaseInfo (..), Report (..), renderJson, renderMarkdown, renderText)
+import Oglyad.Source.Anda (scriptErrors, stripAnsi)
+import Oglyad.Source.Monorepo (PkgDir (..), checkoutRef, findPackageDirs, hclString, lastCommits, macroFingerprint, pruneTrees, specFingerprint, versionMacros)
 import Oglyad.Source.Repodata (RpmEntry (..), decompressAndParse, fetchRepo, latestBySource, parsePrimary, srpmName)
-import Oglyad.Source.Rhai (parseUpdateRhai)
+import Oglyad.Source.Rhai (parseUpdateRhai, parseUpdateRhaiWith)
+import Oglyad.Source.RhaiEval (Simulated (..), simulateVersion)
+import Oglyad.Source.Upstream (isSemver)
 import Oglyad.Types
 import Oglyad.Version
 import System.Directory (createDirectoryIfMissing, createDirectoryLink, createFileLink)
@@ -97,8 +103,99 @@ main = hspec $ do
         ("6.7.3", "v6.7.3", EQ),
         ("0.42.0", "0.41.0^20261031.9e2ed65", GT),
         -- a snapshot taken after the release it's based on isn't drift
-        ("0.41.0", "0.41.0^20261031.9e2ed65", EQ)
+        ("0.41.0", "0.41.0^20261031.9e2ed65", EQ),
+        -- snapshot suffixes don't stop a respelled version from matching
+        ("2.0.0-alpha-1-20250926", "2.0.0~alpha~1~20250926.gitfc62ae7", EQ),
+        ("0.4-2", "0.4~2^20260805git.d5d9f60", EQ),
+        ("1.3", "1.2^20260101git.abc1234", GT),
+        ("1.2", "1.2~rc1^20260101git.abc1234", GT)
       ]
+
+  describe "isSemver" $ do
+    it "takes plain versions" $ isSemver "v0.17.1" `shouldBe` True
+    it "takes prereleases spelled with a tilde" $ isSemver "0.17.0~preview.128" `shouldBe` True
+    it "rejects leading zeros, like Jane Street's old scheme" $ isSemver "113.24.00" `shouldBe` False
+    it "rejects two-part versions" $ isSemver "1.2" `shouldBe` False
+
+  describe "regex" $ do
+    let firstCaps p t = either (const Nothing) (either (const Nothing) id . (`Re.captures` t)) (Re.compile p)
+    it "is leftmost-first, like Rust" $
+      -- POSIX engines like regex-tdfa take the longest, "ab"
+      firstCaps "(a|ab)" "ab" `shouldBe` Just [Just "a", Just "a"]
+    it "supports lazy quantifiers" $
+      firstCaps "<(.+?)>" "<a><b>" `shouldBe` Just [Just "<a>", Just "a"]
+    it "reports groups that didn't take part" $
+      firstCaps "(a)|(b)" "b" `shouldBe` Just [Just "b", Nothing, Just "b"]
+    it "anchors lines only in multi-line mode" $ do
+      firstCaps "(?m)^Version:\\s*(\\S+)$" "Name: x\nVersion: 1.2\n" `shouldBe` Just [Just "Version: 1.2", Just "1.2"]
+      firstCaps "^Version" "Name: x\nVersion: 1.2" `shouldBe` Nothing
+    it "skips an empty match right after the previous one" $
+      (Re.compile "a*" >>= (`Re.capturesAll` "ab")) `shouldBe` Right [[Just "a"], [Just ""]]
+    it "expands replacements like Rust" $
+      (Re.compile "v(\\d)" >>= \re -> Re.replaceAll re "<$1|${1}x|$1x|$$>" "v1") `shouldBe` Right "<1|1x||$>"
+    it "stays linear on patterns that blow up naive backtracking" $
+      (Re.compile "^(\\s[.-]?|\\s??(\\D?\\b(a|b)|\\S?\\D??\\.??){2}1??a?){0,}b+(a){2}" >>= (`Re.captures` "v1.2.3-rc1"))
+        `shouldBe` Right Nothing
+    -- these three came out of fuzzing against the real crate. they only agree
+    -- with Rust because the NFA has the same shape and a visited set
+    it "takes an empty first iteration of x* like Rust" $
+      firstCaps "(a*)?[^a]+?" "v" `shouldBe` Just [Just "v", Just ""]
+    it "doesn't loop again after an empty iteration" $
+      firstCaps "b??(x*?)*" "xx" `shouldBe` Just [Just "", Just ""]
+    it "keeps the last non-empty iteration's captures" $
+      firstCaps "(a*){0,}a*" "a" `shouldBe` Just [Just "a", Just "a"]
+    it "rejects what it doesn't support" $
+      either (const True) (const False) (Re.compile "\\p{Greek}") `shouldBe` True
+
+  describe "simulateVersion" $ do
+    let gh = GitHub "a/b"
+        sim tag script = simulateVersion gh tag script
+    it "passes a plain rpm.version through" $
+      sim "v1.2.3" "rpm.version(gh(\"a/b\"));" `shouldBe` Sets "v1.2.3"
+    it "skips tags a starts_with guard rejects" $ do
+      let script = "let v = gh(\"a/b\");\nif v.starts_with(\"cli-v\") {\n    v.crop(5);\n    rpm.version(v);\n}"
+      sim "desktop-v2026.10.4" script `shouldBe` NoUpdate
+      sim "cli-v2026.10.4" script `shouldBe` Sets "2026.10.4"
+    it "runs else branches" $ do
+      let script = "let ver = gh(\"a/b\");\nif ver.starts_with(\"vm-\") {\n\tver.crop(3);\n\trpm.version(ver);\n} else {\n\tprint(`graalvm: ${ver}?`);\n}"
+      sim "jdk-25.0.1" script `shouldBe` NoUpdate
+    it "compares strings like Rhai" $ do
+      let script = "let v = gh(\"a/b\");\nv.crop(1);\nif v < \"5\" {\n  rpm.version(v);\n}"
+      sim "v5.4.1" script `shouldBe` NoUpdate
+      sim "v4.8.0" script `shouldBe` Sets "4.8.0"
+    it "applies pop and replace, preferring rpm.version over the ver global" $ do
+      let script = "let v = gh(\"a/b\");\nv.crop(1);\nrpm.global(\"ver\", v);\nif v.ends_with(\"-release\") {\n  v.pop(8);\n}\nv.replace(\"-\", \"~\");\nrpm.version(v);"
+      sim "v0.0.17-beta-release" script `shouldBe` Sets "0.0.17~beta"
+    it "treats rpm.changed() as true and follows truncate" $ do
+      let script = "rpm.global(\"commit\", gh_commit(\"a/b\"));\nif rpm.changed() {\n    rpm.release();\n    let v = gh(\"a/b\");\n    v.truncate(6);\n    v.crop(1);\n    rpm.global(\"ver\", v);\n}"
+      sim "v1.0.1-iot-arl-twl-asl-v6.12" script `shouldBe` Sets "1.0.1"
+    it "knows a script that never sets Version won't update" $
+      sim "vUDK2018" "let v = gh(\"a/b\");\nrpm.global(\"release_tag\", v);\nv.crop(3);\nrpm.global(\"shortcommit\", v);" `shouldBe` NoUpdate
+    it "stops at terminate()" $
+      sim "0.4.0" "terminate();\nrpm.version(gh(\"a/b\"));" `shouldBe` NoUpdate
+    it "uses find() as a guard inside try" $ do
+      let script = "let v = gh(\"a/b\");\ntry {\n\tfind(\"(?m)^v[\\\\d.]+$\", v, 0);\n\trpm.version(v);\n}\ncatch {}"
+      sim "v1.3.7-windows-alpha" script `shouldBe` NoUpdate
+      sim "v1.3.8" script `shouldBe` Sets "v1.3.8"
+    it "extracts with find() groups" $
+      sim "Ghidra_11.4_build" "let tag = gh(\"a/b\");\nlet v = find(`Ghidra_([\\d.]+)_build`, tag, 1);\nrpm.version(v);" `shouldBe` Sets "11.4"
+    it "counts find_all() matches in method form" $ do
+      let script = "let v = gh(\"a/b\");\nif `[\\d.]+-beta\\.\\d+`.find_all(v).len == 0 {\n  rpm.version(v);\n}"
+      sim "1.2.3-beta.4" script `shouldBe` NoUpdate
+      sim "1.2.3" script `shouldBe` Sets "1.2.3"
+    it "rewrites with sub() and indexes find_all() results" $ do
+      sim "release-1_2_3" "let v = sub(`_`, \".\", gh(\"a/b\"));\nrpm.version(sub(`^release-`, \"\", v));" `shouldBe` Sets "1.2.3"
+      sim "v1.2 v1.3" "let m = find_all(`v([\\d.]+)`, gh(\"a/b\"));\nrpm.version(m[-1][1]);" `shouldBe` Sets "1.3"
+    it "fills in template strings" $
+      sim "pkg-1.2" "let name = \"pkg\";\nlet t = gh(\"a/b\");\nrpm.version(find(`${name}-([\\d.]+)`, t, 1));" `shouldBe` Sets "1.2"
+    it "gives up when find() throws with nothing to catch it" $
+      sim "nope" "rpm.version(find(`v([\\d.]+)`, gh(\"a/b\"), 1));" `shouldBe` CantTell
+    it "gives up on calls it can't model" $
+      sim "1.2" "let v = gh(\"a/b\");\nrpm.version(mystery(v));" `shouldBe` CantTell
+    it "gives up on scripts with unbalanced brackets" $
+      sim "0.2.1" "if rpm.changed() {\n    let v = gh(\"a/b\"));\n    v.crop(1);\n    rpm.global(\"ver\", v);\n}" `shouldBe` CantTell
+    it "ignores other helpers that don't feed Version" $
+      sim "v0.14.1" "rpm.version(gh(\"a/b\"));\nif rpm.changed() {\n    rpm.global(\"drawio_ver\", gh(\"c/d\").crop(1));\n}" `shouldBe` Sets "v0.14.1"
 
   describe "srpmName" $ do
     it "strips version and release" $
@@ -135,6 +232,7 @@ main = hspec $ do
     it "finds the spec" $ hclString "spec" hcl `shouldBe` Just "zed.spec"
     it "finds the subrepo" $ hclString "subrepo" hcl `shouldBe` Just "extras"
     it "doesn't match key prefixes" $ hclString "sub" hcl `shouldBe` Nothing
+    it "reads bare values like nightly = 1" $ hclString "nightly" "labels {\n  nightly = 2 # slot\n}\n" `shouldBe` Just "2"
 
   describe "parseUpdateRhai" $ do
     it "understands gh()" $
@@ -157,6 +255,51 @@ main = hspec $ do
       parseUpdateRhai "import \"andax/bump_extras.rhai\" as bump;\nrpm.version(bump::madoguchi(\"zig-master\", labels.branch));" `shouldBe` Derived "bump::madoguchi"
     it "ignores comments" $
       parseUpdateRhai "// gh(\"wrong/one\")\nrpm.version(pypi(\"west\"));" `shouldBe` PyPI "west"
+    it "follows kmod-common siblings instead of calling them unparsed" $
+      parseUpdateRhai "let c = sh(\"cat anda/system/x/kmod-common/x.spec | grep 'Version: ' | sed -E 's/Version: +//'\", #{});\nc.trim();\nrpm.version(c);"
+        `shouldBe` Derived "another spec in the repo"
+    it "calls a commit set from get() commit tracking" $
+      parseUpdateRhai "let json = get(\"https://api.github.com/repos/a/b/commits/main\").json();\nrpm.global(\"commit\", json.sha);"
+        `shouldBe` CommitTracked
+    it "doesn't call a scraped version commit tracking because it records the commit" $
+      parseUpdateRhai "let r = get(\"https://api.github.com/repos/a/b/tags\").json_arr();\nrpm.version(r[0].name);\nif rpm.changed() {\n  rpm.global(\"commit\", r[0].commit.sha);\n}"
+        `shouldSatisfy` isUnknown
+    it "knows a release-bump-only script doesn't set a version" $
+      parseUpdateRhaiWith (Just ["fedora", "rhel"]) "import \"andax/bump_extras.rhai\" as bump;\nopen_file(\"RELEASE.txt\", \"w\").write(bump::as_bodhi_ver(labels.branch));\nrpm.release();"
+        `shouldBe` NoVersion
+    it "counts globals the Version: line uses as setting the version" $ do
+      let ente = "let tags = git_tags(\"https://github.com/ente-io/ente\").filter(|t| t.starts_with(\"cli-v\"));\nrpm.global(\"tag\", tags[tags.len - 1]);"
+      parseUpdateRhaiWith (Just ["tag"]) ente `shouldSatisfy` isUnknown
+      parseUpdateRhaiWith (Just ["other"]) ente `shouldBe` NoVersion
+    it "doesn't guess NoVersion without the spec's Version: line" $
+      parseUpdateRhai "rpm.release();" `shouldSatisfy` isUnknown
+
+  describe "anda logs" $ do
+    it "pulls the reason out of a script exception" $
+      scriptErrors
+        "  2026-11-09T22:25:38.348511Z ERROR andax::run: Script Exception \8212\8212 lib/libfreeaptx\n\
+        \   \9500\9472\9552 Rhai: Syntax error: Expecting ';' to terminate this statement (line 5, position 39)\n\
+        \    in andax::run::traceback with proj=\"lib/libfreeaptx\"\n"
+        `shouldBe` ["Rhai: Syntax error: Expecting ';' to terminate this statement (line 5, position 39)"]
+    it "finds nothing in a clean log" $
+      scriptErrors "  2026-11-09T22:25:34Z DEBUG anda_config::config: Reading hcl file: \"anda.hcl\"\n" `shouldBe` []
+    it "strips color codes" $
+      stripAnsi "   0: \ESC[91mProject not found: x\ESC[0m" `shouldBe` "   0: Project not found: x"
+
+  describe "unparsed-rhai with anda" $
+    it "stays quiet once anda answered for the script" $ do
+      let unknown = pkg {pkgUpstream = Just (Unknown "let x = get(\"u\");")}
+      map fCheck (UnparsedRhai.check snapshot unknown) `shouldBe` ["unparsed-rhai"]
+      UnparsedRhai.check snapshot unknown {pkgUpstreamVer = Just "1.3.0"} `shouldBe` []
+
+  describe "versionMacros" $ do
+    it "finds %name, %{name} and %{?name}" $
+      versionMacros "Name: x\nVersion:  %{?fedora:%{fedora}}%{?rhel:%{rhel}}\n" `shouldBe` Just ["fedora", "fedora", "rhel", "rhel"]
+    it "finds macros inside shell expansions" $
+      versionMacros "%global tag cli-v0.3.0\nVersion: %(echo %tag | sed 's/^cli-v//')\n" `shouldBe` Just ["tag"]
+    it "is Nothing without a Version: line" $
+      versionMacros "Name: x\n" `shouldBe` Nothing
+
     it "falls back to Unknown" $
       parseUpdateRhai "let x = get(\"https://example.com\").json();\nrpm.version(x.version);" `shouldSatisfy` isUnknown
 
@@ -169,6 +312,19 @@ main = hspec $ do
       Drift.check snapshot (pkg {pkgSpecEVR = Just (EVR 0 "1.2.0^20261101git1234abc" "1.fc44"), pkgUpstreamVer = Just "1.2.0"}) `shouldBe` []
     it "is quiet without upstream data" $
       Drift.check snapshot pkg `shouldBe` []
+    it "doesn't hold nightlies to the latest stable release" $ do
+      let nightly = pkg {pkgNightly = True, pkgSpecEVR = Just (EVR 0 "0.41.0^20261031.9e2ed65" "1.fc44"), pkgUpstreamVer = Just "v0.42.0"}
+      Drift.check snapshot nightly `shouldBe` []
+      Drift.drift nightly `shouldBe` Nothing
+    it "still flags a mangled version on a nightly" $
+      severities (Drift.check snapshot (pkg {pkgNightly = True, pkgUpstreamVer = Just ".0.1"})) `shouldBe` [Warn]
+    it "warns when update.rhai mangles the version" $
+      map fMessage (Drift.check snapshot (pkg {pkgSpecEVR = Just (EVR 0 ".0.1^20261029.git.8ce4f26" "1.fc44"), pkgUpstreamVer = Just ".0.1"}))
+        `shouldBe` ["update.rhai would set the version to \".0.1\", which doesn't start with a letter or digit"]
+
+  describe "unparsed-rhai check"
+    $ it "flags scripts with unbalanced brackets"
+    $ severities (UnparsedRhai.check snapshot (pkg {pkgRhai = Just "let v = gh_tag(\"a/b\"));\nrpm.version(v);"})) `shouldBe` [Warn]
 
   describe "fedora-overlap check" $ do
     let withFedora = snapshot {snapFedora = Set.singleton "zed"}
@@ -190,7 +346,7 @@ main = hspec $ do
       DuplicateName.check snapshot pkg `shouldBe` []
 
   describe "report" $ do
-    let f path = Finding "build-lag" "zed" (Just path) Warn "x"
+    let f path = Finding "build-lag" "zed" (Just path) Warn "x" []
     it "shows the directory when a name is ambiguous" $
       renderText Info (report [f "anda/a", f "anda/b"]) `shouldSatisfy` T.isInfixOf "zed (anda/a): x"
     it "keeps it short otherwise" $
@@ -201,7 +357,7 @@ main = hspec $ do
       let o = case decode (renderJson (report [f "anda/a"])) of
             Just (Object x) -> x
             _ -> KM.empty
-      KM.lookup "schema" o `shouldBe` Just (Number 1)
+      KM.lookup "schema" o `shouldBe` Just (Number 2)
       KM.lookup "summary" o `shouldSatisfy` maybe False (\case Object s -> KM.lookup "warn" s == Just (Number 1); _ -> False)
       KM.lookup "findings" o `shouldSatisfy` maybe False (\case Array a -> length a == 1; _ -> False)
     it "escapes pipes in markdown tables" $
@@ -210,7 +366,7 @@ main = hspec $ do
       renderMarkdown Info (report [(f "anda/a") {fSeverity = Info}]) `shouldSatisfy` T.isInfixOf "<details><summary>Info (1)"
 
   describe "ignores" $ do
-    let f check path name = Finding check name (Just path) Warn "x"
+    let f check path name = Finding check name (Just path) Warn "x" []
         dup = f "duplicate-name" "anda/langs/zig/master-bootstrap" "zig-master"
         lag = f "build-lag" "anda/devs/zed/stable" "zed"
         file rules = IgnoreFile rules
@@ -227,7 +383,7 @@ main = hspec $ do
       $ \(what, raw) -> it ("rejects " <> what) $ parseIgnoreFile checkNames raw `shouldSatisfy` either (const True) (const False)
     it "ignores by path" $ do
       let Applied {..} = apply [rule "duplicate-name" (ByPath "anda/langs/zig/master-bootstrap")] [] [dup, lag]
-      (apKept, apIgnored, apProblems) `shouldBe` ([lag], [dup], [])
+      (apKept, apIgnored, apUnused, apProblems) `shouldBe` ([lag], [dup], [], [])
     it "ignores by package name" $ do
       let Applied {..} = apply [rule "build-lag" (ByName "zed")] [] [dup, lag]
       (apKept, apIgnored) `shouldBe` ([dup], [lag])
@@ -239,10 +395,10 @@ main = hspec $ do
       apKept `shouldBe` [lag]
     it "reports entries that match nothing" $ do
       let Applied {..} = apply [rule "stale" (ByName "gone")] [] [lag]
-      map fCheck apProblems `shouldBe` ["unused-ignore"]
+      map fCheck apUnused `shouldBe` ["unused-ignore"]
     it "doesn't call entries unused when their check didn't run" $ do
       let Applied {..} = applyIgnores checkNames ["build-lag"] (file [rule "stale" (ByName "gone")]) Map.empty [lag]
-      apProblems `shouldBe` []
+      apUnused `shouldBe` []
     it "flags unknown check names in labels" $ do
       let Applied {..} = apply [] [("anda/x", ["stael"])] []
       map fSeverity apProblems `shouldBe` [Warn]
@@ -280,6 +436,18 @@ main = hspec $ do
         _ <- specFingerprint "m" ".fc44" root "anda/a"
         pure ()
 
+  describe "nightly labels" $
+    it "treats nightly and quaterdaily as branch-head builds, not weekly" $
+      withSystemTempDirectory "oglyad-labels" $ \root -> do
+        let pkgDir name label = do
+              createDirectoryIfMissing True (root </> "anda" </> name)
+              writeFile (root </> "anda" </> name </> "anda.hcl") ("project pkg {\n  labels {\n    " <> label <> " = 1\n  }\n}\n")
+        pkgDir "n" "nightly"
+        pkgDir "q" "quaterdaily"
+        pkgDir "w" "weekly"
+        dirs <- findPackageDirs root
+        [(pdPath d, pdNightly d) | Right d <- dirs] `shouldBe` [("anda/n", True), ("anda/q", True), ("anda/w", False)]
+
   describe "parseCheckName" $ do
     it "accepts known checks" $ parseCheckName "build-lag" `shouldBe` Right "build-lag"
     it "rejects typos instead of silently running nothing" $
@@ -303,6 +471,74 @@ main = hspec $ do
           fpAfter <- macroFingerprint
           fpAfter `shouldNotBe` fpBefore
 
+  describe "releases" $ do
+    it "parses --release spellings" $
+      map parseReleaseArg ["43", "f44", "rawhide", "frawhide", "el10", ""]
+        `shouldBe` [Right (NumberedArg 43), Right (NumberedArg 44), Right RawhideArg, Right RawhideArg, Left "unknown release \"el10\", expected a number like 43, f43, or rawhide", Left "unknown release \"\", expected a number like 43, f43, or rawhide"]
+    it "spells rawhide's dist, branch and repos the way Terra does" $ do
+      let raw = Release "rawhide" 46
+      (releaseDist raw, releaseBranch raw, terraRepoFor raw, releaseLabel raw) `shouldBe` (".fcrawhide", "frawhide", "https://repos.fyralabs.com/terrarawhide", "rawhide")
+      fedoraReposFor raw `shouldBe` ["https://dl.fedoraproject.org/pub/fedora/linux/development/rawhide/Everything/x86_64/os"]
+      length (fedoraReposFor (Release "43" 43)) `shouldBe` 2
+    it "takes Fedora releases from Bodhi, rawhide last" $
+      parseBodhiReleases bodhiFixture `shouldBe` Right [Release "43" 43, Release "44" 44, Release "45" 45, Release "rawhide" 46]
+    it "complains when Bodhi lists nothing useful" $
+      parseBodhiReleases "{\"releases\": []}" `shouldSatisfy` either (const True) (const False)
+
+  describe "mergeFindings" $ do
+    let r43 = Release "43" 43
+        r44 = Release "44" 44
+        lag dist = Finding "build-lag" "zed" (Just "anda/zed") Error ("never published (spec is at 1.2-1" <> dist <> ")") []
+        drift = Finding "drift" "zed" (Just "anda/zed") Warn "upstream has 1.3, spec is at 1.2" []
+    it "merges findings that only differ by dist" $
+      mergeFindings [(r43, [lag ".fc43"]), (r44, [lag ".fc44"])]
+        `shouldBe` [(lag "%{dist}") {fReleases = ["43", "44"]}]
+    it "keeps the real message for a single release" $
+      mergeFindings [(r43, [drift]), (r44, [lag ".fc44"])]
+        `shouldBe` [drift {fReleases = ["43"]}, (lag ".fc44") {fReleases = ["44"]}]
+    it "tags findings with only the releases that have them" $
+      map fReleases (mergeFindings [(r43, [drift]), (r44, [drift, lag ".fc44"])]) `shouldBe` [["43", "44"], ["44"]]
+
+  describe "release tags in reports" $ do
+    let infos = [ReleaseInfo n ("f" <> n) Nothing Nothing "" | n <- ["43", "44"]]
+        f rels = Finding "drift" "zed" (Just "anda/zed") Warn "x" rels
+        two fs = (report fs) {rReleases = infos}
+    it "says which releases a finding is in when it isn't all of them" $
+      renderText Info (two [f ["44"]]) `shouldSatisfy` T.isInfixOf "zed [f44]: x"
+    it "says nothing when it's in every release" $
+      renderText Info (two [f ["43", "44"]]) `shouldSatisfy` T.isInfixOf "zed: x"
+
+  describe "checkoutRef" $
+    it "extracts a branch without touching the checkout, once per commit" $
+      withSystemTempDirectory "oglyad-ref" $ \tmp -> do
+        let repo = tmp </> "repo"
+            cache = tmp </> "cache"
+            git args =
+              runProcess_ . System.Process.Typed.setEnv [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")] $
+                proc "git" (["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"] <> args)
+            commitFile body = do
+              writeFile (repo </> "anda" </> "a" </> "anda.hcl") body
+              git ["add", "-A"]
+              git ["commit", "-q", "-m", body]
+        createDirectoryIfMissing True (repo </> "anda" </> "a")
+        git ["init", "-q"]
+        commitFile "old"
+        git ["branch", "f43"]
+        commitFile "new"
+        old <- lookupEnv "XDG_CACHE_HOME"
+        System.Environment.setEnv "XDG_CACHE_HOME" cache
+        r1 <- checkoutRef repo "f43"
+        r2 <- checkoutRef repo "f43"
+        missing <- checkoutRef repo "f99"
+        maybe (unsetEnv "XDG_CACHE_HOME") (System.Environment.setEnv "XDG_CACHE_HOME") old
+        case r1 of
+          Left e -> expectationFailure (T.unpack e)
+          Right (dir, _) -> do
+            readFile (dir </> "anda" </> "a" </> "anda.hcl") >>= (`shouldBe` "old")
+            readFile (repo </> "anda" </> "a" </> "anda.hcl") >>= (`shouldBe` "new")
+        r2 `shouldBe` r1
+        missing `shouldSatisfy` either (const True) (const False)
+
   describe "lastCommits" $
     it "reads commit times, including UTC ones git prints with a Z" $
       withSystemTempDirectory "oglyad-git" $ \repo -> do
@@ -317,7 +553,7 @@ main = hspec $ do
         git [] ["init", "-q"]
         commitAt "2026-01-02T03:04:05Z" "anda/a"
         commitAt "2026-02-03T04:05:06+08:00" "anda/b"
-        m <- lastCommits repo ["anda/a", "anda/b"]
+        m <- lastCommits repo "HEAD" ["anda/a", "anda/b"]
         Map.lookup "anda/a" m `shouldBe` Just (UTCTime (fromGregorian 2026 1 2) (3 * 3600 + 4 * 60 + 5))
         Map.lookup "anda/b" m `shouldBe` Just (UTCTime (fromGregorian 2026 2 2) (20 * 3600 + 5 * 60 + 6))
 
@@ -366,10 +602,14 @@ pkg =
     { pkgName = "zed",
       pkgPath = "anda/devs/zed/stable",
       pkgSubrepo = Nothing,
+      pkgNightly = False,
+      pkgSpecPath = Just "anda/devs/zed/stable/zed.spec",
+      pkgFingerprint = "",
       pkgSpecEVR = Just (EVR 0 "1.2.0" "1.fc44"),
       pkgRepoBuild = Nothing,
       pkgLastCommit = Nothing,
       pkgUpstream = Just (GitHub "zed-industries/zed"),
+      pkgRhai = Nothing,
       pkgUpstreamVer = Nothing,
       pkgUpstreamErr = Nothing,
       pkgRepoChecked = True
@@ -391,6 +631,7 @@ snapshot =
             cfgStaleAfter = 180 * nominalDay,
             cfgUpstream = False,
             cfgCacheFor = 0,
+            cfgRunStart = now,
             cfgConcurrency = 1,
             cfgGitHubToken = Nothing
           },
@@ -398,13 +639,23 @@ snapshot =
       snapIgnoreLabels = Map.empty
     }
 
+bodhiFixture :: LBS8.ByteString
+bodhiFixture =
+  "{\"releases\": [\
+  \{\"name\": \"F46\", \"version\": \"46\", \"branch\": \"rawhide\", \"id_prefix\": \"FEDORA\", \"state\": \"pending\"},\
+  \{\"name\": \"F44\", \"version\": \"44\", \"branch\": \"f44\", \"id_prefix\": \"FEDORA\", \"state\": \"current\"},\
+  \{\"name\": \"F45C\", \"version\": \"45\", \"branch\": \"f45\", \"id_prefix\": \"FEDORA-CONTAINER\", \"state\": \"current\"},\
+  \{\"name\": \"ELN\", \"version\": \"eln\", \"branch\": \"eln\", \"id_prefix\": \"FEDORA\", \"state\": \"pending\"},\
+  \{\"name\": \"F43\", \"version\": \"43\", \"branch\": \"f43\", \"id_prefix\": \"FEDORA\", \"state\": \"current\"},\
+  \{\"name\": \"F45\", \"version\": \"45\", \"branch\": \"f45\", \"id_prefix\": \"FEDORA\", \"state\": \"current\"}\
+  \]}"
+
 report :: [Finding] -> Report
 report fs =
   Report
     { rVersion = "0",
       rGenerated = now,
-      rMonorepoHead = Just "abc",
-      rTerraRepo = "https://repos.fyralabs.com/terra44",
+      rReleases = [ReleaseInfo "44" "f44" (Just "origin/f44") (Just "abc") "https://repos.fyralabs.com/terra44"],
       rUpstream = False,
       rFindings = fs,
       rIgnored = []

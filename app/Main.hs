@@ -5,20 +5,24 @@
 module Main (main) where
 
 import Control.Exception (SomeException, try)
-import Control.Monad (unless, when)
+import Control.Monad (forM, unless, when)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
+import Data.List (nub)
+import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (getCurrentTime)
+import Data.Time (UTCTime, getCurrentTime)
 import GHC.Conc (getNumProcessors)
 import GHC.IO.Encoding (setFileSystemEncoding, setForeignEncoding, setLocaleEncoding, utf8)
-import Oglyad.App (oglyadVersion, runApp)
+import Oglyad.App (HttpError (..), httpGetE, oglyadVersion, runApp)
 import Oglyad.Check (checkNames, parseCheckName, runChecks)
 import Oglyad.Collect (buildSnapshot)
 import Oglyad.Ignore (Applied (..), IgnoreFile (..), applyIgnores, parseIgnoreFile)
 import Oglyad.Process (run)
-import Oglyad.Report (Format (..), Report (..), render)
+import Oglyad.Release
+import Oglyad.Report (Format (..), ReleaseInfo (..), Report (..), render)
+import Oglyad.Source.Monorepo (pruneTrees)
 import Oglyad.Types
 import Options.Applicative
 import System.Directory (doesDirectoryExist)
@@ -34,7 +38,12 @@ exitFindings = ExitFailure 1
 exitUsage = ExitFailure 2
 
 data Opts = Opts
-  { optConfig :: Maybe Text -> Int -> Config,
+  { -- | token, cores, run start, spec ref, release
+    optConfig :: Maybe Text -> Int -> UTCTime -> Maybe Text -> Release -> Config,
+    optReleases :: [ReleaseArg],
+    optRemote :: Text,
+    optWorktree :: Bool,
+    optRepo :: Maybe Text,
     optOnly :: [Text],
     optFormat :: Format,
     optMinSev :: Severity,
@@ -47,6 +56,10 @@ data Opts = Opts
 optsP :: Parser Opts
 optsP = do
   optConfig <- configP
+  optReleases <- many (option (eitherReader parseReleaseArg) (long "release" <> short 'r' <> metavar "RELEASE" <> help "release to check: 43, f43 or rawhide. repeatable. default: every release Fedora's Bodhi hasn't archived"))
+  optRemote <- strOption (long "remote" <> metavar "NAME" <> value "origin" <> showDefault <> help "git remote whose release branches (f43, frawhide, ...) hold each release's specs. nothing is fetched, run git fetch yourself")
+  optWorktree <- switch (long "worktree" <> help "read specs from the checkout as it is, local edits included, instead of the release branch. needs exactly one --release")
+  optRepo <- optional (strOption (long "repo" <> metavar "URL" <> help "Terra repo base url (default: https://repos.fyralabs.com/terraN). needs exactly one --release"))
   optOnly <- many (option (eitherReader parseCheckName) (long "only" <> metavar "CHECK" <> help ("run only this check, repeatable. one of: " <> names)))
   optFormat <-
     option (eitherReader format) (long "format" <> short 'f' <> metavar "FORMAT" <> help "text (default), json, or markdown")
@@ -73,33 +86,51 @@ optsP = do
       "never" -> Right Nothing
       other -> Left ("unknown level " <> show other <> ", expected error, warn, info or never")
 
-configP :: Parser (Maybe Text -> Int -> Config)
+configP :: Parser (Maybe Text -> Int -> UTCTime -> Maybe Text -> Release -> Config)
 configP = do
   cfgMonorepo <- strOption (long "monorepo" <> short 'm' <> metavar "DIR" <> value "." <> showDefault <> help "checkout of terrapkg/packages")
-  release <- option auto (long "release" <> short 'r' <> metavar "N" <> value (44 :: Int) <> showDefault <> help "Fedora/Terra release to check")
-  terraRepo <- optional (strOption (long "repo" <> metavar "URL" <> help "Terra repo base url (default: https://repos.fyralabs.com/terraN)"))
-  fedora <- switch (long "fedora" <> help "also check for overlap with Fedora's release and updates repos (downloads ~60MB)")
+  fedora <- switch (long "fedora" <> help "also check for overlap with Fedora's release and updates repos (downloads ~60MB per release)")
   extraFedora <- many (strOption (long "fedora-repo" <> metavar "URL" <> help "extra repo base url to check for overlap, repeatable"))
   staleDays <- option auto (long "stale-days" <> metavar "N" <> value (180 :: Int) <> showDefault <> help "builds older than this count as stale")
   cfgUpstream <- switch (long "upstream" <> short 'u' <> help "query upstream APIs for version drift")
   cacheHours <- option auto (long "cache-hours" <> metavar "N" <> value (6 :: Int) <> showDefault <> help "reuse upstream answers younger than this, 0 to always refetch")
   jobs <- optional (option auto (long "jobs" <> short 'j' <> metavar "N" <> help "parallel jobs (default: number of cores)"))
-  pure $ \cfgGitHubToken cores ->
-    let r = T.pack (show release)
-        fedoraRepos =
-          [ "https://dl.fedoraproject.org/pub/fedora/linux/releases/" <> r <> "/Everything/x86_64/os",
-            "https://dl.fedoraproject.org/pub/fedora/linux/updates/" <> r <> "/Everything/x86_64"
-          ]
-     in Config
-          { cfgTerraRepo = maybe ("https://repos.fyralabs.com/terra" <> r) id terraRepo,
-            cfgFedoraRepos = (if fedora then fedoraRepos else []) <> extraFedora,
-            cfgRelease = release,
-            cfgDist = ".fc" <> r,
-            cfgStaleAfter = fromIntegral (staleDays * 86400),
-            cfgCacheFor = fromIntegral (cacheHours * 3600),
-            cfgConcurrency = maybe cores id jobs,
-            ..
-          }
+  pure $ \cfgGitHubToken cores cfgRunStart cfgSpecRef rel ->
+    Config
+      { cfgTerraRepo = terraRepoFor rel,
+        cfgFedoraRepos = (if fedora then fedoraReposFor rel else []) <> extraFedora,
+        cfgRelease = relVersion rel,
+        cfgDist = releaseDist rel,
+        cfgBranch = releaseBranch rel,
+        cfgStaleAfter = fromIntegral (staleDays * 86400),
+        cfgCacheFor = fromIntegral (cacheHours * 3600),
+        cfgConcurrency = maybe cores id jobs,
+        ..
+      }
+
+-- | turn --release arguments into releases, asking Bodhi for the
+-- maintained ones when none were given, and for rawhide's number when
+-- rawhide was asked for
+resolveReleases :: (Release -> Config) -> [ReleaseArg] -> IO [Release]
+resolveReleases mk args
+  | null args = bodhi >>= either (\e -> runError ("can't ask Bodhi which releases are maintained: " <> e <> ". pass --release to pick them")) pure
+  | otherwise = nub <$> mapM resolve args
+  where
+    resolve = \case
+      NumberedArg n -> pure (Release (T.pack (show n)) n)
+      RawhideArg ->
+        bodhi >>= \case
+          Right rels | r : _ <- filter isRawhide rels -> pure r
+          Right _ -> runError "Bodhi didn't list a rawhide release"
+          Left e -> runError ("can't ask Bodhi for rawhide's version: " <> e <> ". pass numbered releases instead")
+    -- runApp wants a config. none of it matters for one http request
+    bodhi = runApp (mk (Release "rawhide" 0)) $ do
+      body <- httpGetE bodhiReleasesUrl
+      pure $ case body of
+        Left (HttpFailed e) -> Left e
+        Left (RateLimited e) -> Left e
+        Right b -> parseBodhiReleases b
+    runError msg = hPutStrLn stderr ("oglyad: " <> T.unpack msg) >> exitWith exitUsage
 
 -- | GITHUB_TOKEN, or whatever the gh cli is logged in with. the token is only
 -- ever sent to api.github.com, and never passed to child processes
@@ -121,10 +152,11 @@ parseOpts = do
           (optsP <**> helper <**> simpleVersioner ("oglyad " <> T.unpack oglyadVersion))
           (fullDesc <> progDesc "repository metadata and health checker for Terra")
   case execParserPure defaultPrefs pinfo args of
-    Failure f -> do
-      let (msg, code) = renderFailure f prog
-      hPutStrLn stderr msg
-      exitWith (if code == ExitSuccess then ExitSuccess else exitUsage)
+    Failure f -> case renderFailure f prog of
+      -- --help and --version are output, not errors, so they go to stdout
+      -- (help2man and friends read them from there)
+      (msg, ExitSuccess) -> putStrLn msg >> exitWith ExitSuccess
+      (msg, _) -> hPutStrLn stderr msg >> exitWith exitUsage
     other -> handleParseResult other
 
 usageError :: String -> IO a
@@ -145,29 +177,49 @@ main = do
       case raw of
         Left (e :: SomeException) -> usageError ("can't read ignore file " <> path <> ": " <> show e)
         Right bytes -> either (\e -> usageError (path <> ": " <> e)) pure (parseIgnoreFile checkNames bytes)
+  when (optWorktree && length optReleases /= 1) $
+    usageError "--worktree checks the working tree against one release, so it needs exactly one --release"
+  when (isJust optRepo && length optReleases /= 1) $
+    usageError "--repo names one Terra repo, so it needs exactly one --release"
   token <- githubToken
   cores <- getNumProcessors
-  let cfg = optConfig token cores
-  hasAnda <- doesDirectoryExist (cfgMonorepo cfg </> "anda")
+  start <- getCurrentTime
+  let specRef rel = if optWorktree then Nothing else Just (optRemote <> "/" <> releaseBranch rel)
+      mkCfg rel =
+        let c = optConfig token cores start (specRef rel) rel
+         in maybe c (\url -> c {cfgTerraRepo = url}) optRepo
+  hasAnda <- doesDirectoryExist (cfgMonorepo (mkCfg (Release "rawhide" 0)) </> "anda")
   unless hasAnda $
-    usageError (cfgMonorepo cfg <> " doesn't look like a terrapkg/packages checkout (no anda/ directory). point -m at one")
+    usageError (cfgMonorepo (mkCfg (Release "rawhide" 0)) <> " doesn't look like a terrapkg/packages checkout (no anda/ directory). point -m at one")
+  releases <- resolveReleases mkCfg optReleases
 
-  (snap, collectFindings) <- runApp cfg buildSnapshot
-  now <- getCurrentTime
   let ran = if null optOnly then checkNames else optOnly
-      findings = collectFindings <> runChecks optOnly snap
-      Applied {..}
-        | optNoIgnores = Applied findings [] []
-        | otherwise = applyIgnores checkNames ran ignores (snapIgnoreLabels snap) findings
+  perRelease <- forM releases $ \rel -> do
+    let cfg = mkCfg rel
+    hPutStrLn stderr ("oglyad: checking " <> T.unpack (releaseLabel rel) <> " from " <> maybe "the working tree" T.unpack (cfgSpecRef cfg))
+    (snap, collectFindings) <- runApp cfg buildSnapshot
+    let findings = collectFindings <> runChecks optOnly snap
+        applied
+          | optNoIgnores = Applied findings [] [] []
+          | otherwise = applyIgnores checkNames ran ignores (snapIgnoreLabels snap) findings
+        relInfo = ReleaseInfo (relName rel) (releaseLabel rel) (cfgSpecRef cfg) (snapHead snap) (cfgTerraRepo cfg)
+    pure (rel, relInfo, applied)
+  -- extracted trees for commits nothing checks anymore are just disk space
+  unless optWorktree $
+    pruneTrees [c | (_, ReleaseInfo {riCommit = Just c}, _) <- perRelease]
+
+  now <- getCurrentTime
+  let merged f = mergeFindings [(rel, f a) | (rel, _, a) <- perRelease]
+      -- an ignore entry is only unused if no release needed it
+      unused = [f | f <- merged apUnused, length (fReleases f) == length releases]
       report =
         Report
           { rVersion = oglyadVersion,
             rGenerated = now,
-            rMonorepoHead = snapHead snap,
-            rTerraRepo = cfgTerraRepo cfg,
-            rUpstream = cfgUpstream cfg,
-            rFindings = apKept <> apProblems,
-            rIgnored = apIgnored
+            rReleases = [ri | (_, ri, _) <- perRelease],
+            rUpstream = any (\(rel, _, _) -> cfgUpstream (mkCfg rel)) perRelease,
+            rFindings = merged apKept <> merged apProblems <> unused,
+            rIgnored = merged apIgnored
           }
   LBS.putStr (render optFormat optMinSev report)
   when (maybe False (\level -> any ((>= level) . fSeverity) (rFindings report)) optFailOn) $

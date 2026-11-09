@@ -77,8 +77,11 @@ data Applied = Applied
     apKept :: [Finding],
     -- | findings an ignore matched
     apIgnored :: [Finding],
-    -- | problems with the ignores themselves: unused file entries, unknown
-    -- check names in anda.hcl labels
+    -- | ignore file entries that matched nothing. kept apart from apProblems
+    -- because with several releases, an entry is only unused if it matched
+    -- nothing in any of them
+    apUnused :: [Finding],
+    -- | unknown check names in anda.hcl labels
     apProblems :: [Finding]
   }
 
@@ -91,7 +94,8 @@ applyIgnores known ran (IgnoreFile rules) labels findings =
   Applied
     { apKept = kept,
       apIgnored = ignored,
-      apProblems = unused <> badLabels
+      apUnused = unused,
+      apProblems = badLabels
     }
   where
     (ignored, kept) = partition isIgnored findings
@@ -109,7 +113,8 @@ applyIgnores known ran (IgnoreFile rules) labels findings =
             fPackage = describe (irTarget r),
             fPath = case irTarget r of ByPath p -> Just p; ByName _ -> Nothing,
             fSeverity = Info,
-            fMessage = "ignore file entry for " <> irCheck r <> " matches nothing anymore, remove it"
+            fMessage = "ignore file entry for " <> irCheck r <> " matches nothing anymore, remove it",
+            fReleases = []
           }
       | r <- rules,
         irCheck r `elem` ran,
@@ -121,7 +126,8 @@ applyIgnores known ran (IgnoreFile rules) labels findings =
             fPackage = T.pack path,
             fPath = Just (T.pack path),
             fSeverity = Warn,
-            fMessage = "oglyad_ignore in anda.hcl names unknown check " <> c
+            fMessage = "oglyad_ignore in anda.hcl names unknown check " <> c,
+            fReleases = []
           }
       | (path, cs) <- Map.toList labels,
         c <- cs,
