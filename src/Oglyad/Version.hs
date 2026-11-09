@@ -3,14 +3,15 @@
 -- reference implementation: rpmio/rpmvercmp.c in rpm-software-management/rpm
 -- test vectors: tests/rpmvercmp.at in the same repo
 module Oglyad.Version
-  ( EVR (..)
-  , parseEVR
-  , renderEVR
-  , rpmvercmp
-  , compareEVR
-  , normalizeVersion
-  , compareUpstream
-  ) where
+  ( EVR (..),
+    parseEVR,
+    renderEVR,
+    rpmvercmp,
+    compareEVR,
+    normalizeVersion,
+    compareUpstream,
+  )
+where
 
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Char (isAlphaNum, isAsciiLower, isAsciiUpper, isDigit)
@@ -27,9 +28,9 @@ import Text.Read (readMaybe)
 -- purpose, since any textual difference between git and the repo is worth
 -- reporting
 data EVR = EVR
-  { evrEpoch :: !Int
-  , evrVersion :: !Text
-  , evrRelease :: !Text
+  { evrEpoch :: !Int,
+    evrVersion :: !Text,
+    evrRelease :: !Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)

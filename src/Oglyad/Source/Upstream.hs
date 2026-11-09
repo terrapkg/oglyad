@@ -2,14 +2,15 @@
 -- json fields as anda's andax helpers (andax/fns/tsunagu.rs in FyraLabs/anda)
 -- so oglyad sees exactly what `anda update` would see
 module Oglyad.Source.Upstream
-  ( latestVersion
-  ) where
+  ( latestVersion,
+  )
+where
 
 import Control.Monad.Reader (liftIO)
 import Data.Aeson (Value (..), eitherDecode)
-import Data.ByteString.Lazy qualified as LBS
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
+import Data.ByteString.Lazy qualified as LBS
 import Data.List (maximumBy)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -82,9 +83,9 @@ opam name = do
     let versions = case v of
           Array entries ->
             [ ver
-            | Object o <- V.toList entries
-            , Just (String n) <- [KM.lookup "name" o]
-            , Just ver <- [T.stripPrefix (name <> ".") n]
+            | Object o <- V.toList entries,
+              Just (String n) <- [KM.lookup "name" o],
+              Just ver <- [T.stripPrefix (name <> ".") n]
             ]
           _ -> []
     case versions of

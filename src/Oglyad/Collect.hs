@@ -1,7 +1,8 @@
 -- | the imperative shell: gather every data source into one 'Snapshot'
 module Oglyad.Collect
-  ( buildSnapshot
-  ) where
+  ( buildSnapshot,
+  )
+where
 
 import Control.Concurrent.Async (concurrently)
 import Control.Monad (when)
@@ -53,10 +54,10 @@ buildSnapshot = do
 
   let snap =
         Snapshot
-          { snapPackages = Map.fromList [(pkgName p, p) | p <- pkgs]
-          , snapFedora = foldMap Map.keysSet fedora
-          , snapNow = now
-          , snapConfig = cfg
+          { snapPackages = Map.fromList [(pkgName p, p) | p <- pkgs],
+            snapFedora = foldMap Map.keysSet fedora,
+            snapNow = now,
+            snapConfig = cfg
           }
   pure (snap, specErrs <> repoErrs)
 
@@ -118,15 +119,15 @@ toPackage commits PkgDir {..} = \case
   Just (Right SpecInfo {..}) ->
     Right
       Package
-        { pkgName = siName
-        , pkgPath = pdPath
-        , pkgSubrepo = pdSubrepo
-        , pkgSpecEVR = Just siEVR
-        , pkgRepoBuild = Nothing
-        , pkgLastCommit = Map.lookup pdPath commits
-        , pkgUpstream = parseUpdateRhai <$> pdUpdateRhai
-        , pkgUpstreamVer = Nothing
-        , pkgUpstreamErr = Nothing
+        { pkgName = siName,
+          pkgPath = pdPath,
+          pkgSubrepo = pdSubrepo,
+          pkgSpecEVR = Just siEVR,
+          pkgRepoBuild = Nothing,
+          pkgLastCommit = Map.lookup pdPath commits,
+          pkgUpstream = parseUpdateRhai <$> pdUpdateRhai,
+          pkgUpstreamVer = Nothing,
+          pkgUpstreamErr = Nothing
         }
   where
     firstLine t = let l = T.takeWhile (/= '\n') t in if T.null l then "(no output)" else l
@@ -150,10 +151,10 @@ withUpstreams now pkgs = do
       new =
         Map.fromList
           [ (T.pack (show src), CacheEntry now (Right v))
-          | p <- wanted
-          , isNothing (fresh p)
-          , Just src <- [pkgUpstream p]
-          , Just (Right v) <- [Map.lookup (pkgName p) byName]
+          | p <- wanted,
+            isNothing (fresh p),
+            Just src <- [pkgUpstream p],
+            Just (Right v) <- [Map.lookup (pkgName p) byName]
           ]
   liftIO (saveJson "upstream.json" (new <> cache))
   pure

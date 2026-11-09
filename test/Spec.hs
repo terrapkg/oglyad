@@ -31,28 +31,29 @@ main = hspec $ do
 
   -- vectors from rpm's tests/rpmvercmp.at
   describe "rpmvercmp" $ do
-    mapM_ vercmpCase
-      [ ("1.0", "1.0", EQ)
-      , ("1.0", "2.0", LT)
-      , ("2.0.1", "2.0", GT)
-      , ("2.0.1a", "2.0.1", GT)
-      , ("5.5p1", "5.5p2", LT)
-      , ("5.5p10", "5.5p1", GT)
-      , ("10xyz", "10.1xyz", LT)
-      , ("xyz10", "xyz10.1", LT)
-      , ("xyz.4", "8", LT)
-      , ("1.05", "1.5", EQ)
-      , ("2.0", "2_0", EQ)
-      , ("2a", "2.0", LT)
-      , ("1.0~rc1", "1.0", LT)
-      , ("1.0~rc1", "1.0~rc2", LT)
-      , ("1.0~rc1~git123", "1.0~rc1", LT)
-      , ("1.0^", "1.0", GT)
-      , ("1.0^git1", "1.01", LT)
-      , ("1.0^git1~pre", "1.0^git1", LT)
-      , ("1.0~rc1^git1", "1.0~rc1", GT)
-      , ("1.0^git1", "1.0^git2", LT)
-      , ("1.0^20160101", "1.0.1", LT)
+    mapM_
+      vercmpCase
+      [ ("1.0", "1.0", EQ),
+        ("1.0", "2.0", LT),
+        ("2.0.1", "2.0", GT),
+        ("2.0.1a", "2.0.1", GT),
+        ("5.5p1", "5.5p2", LT),
+        ("5.5p10", "5.5p1", GT),
+        ("10xyz", "10.1xyz", LT),
+        ("xyz10", "xyz10.1", LT),
+        ("xyz.4", "8", LT),
+        ("1.05", "1.5", EQ),
+        ("2.0", "2_0", EQ),
+        ("2a", "2.0", LT),
+        ("1.0~rc1", "1.0", LT),
+        ("1.0~rc1", "1.0~rc2", LT),
+        ("1.0~rc1~git123", "1.0~rc1", LT),
+        ("1.0^", "1.0", GT),
+        ("1.0^git1", "1.01", LT),
+        ("1.0^git1~pre", "1.0^git1", LT),
+        ("1.0~rc1^git1", "1.0~rc1", GT),
+        ("1.0^git1", "1.0^git2", LT),
+        ("1.0^20160101", "1.0.1", LT)
       ]
     it "is reflexive" $ property $ \(V a) -> rpmvercmp a a == EQ
     it "is antisymmetric" $ property $ \(V a) (V b) ->
@@ -68,19 +69,19 @@ main = hspec $ do
   describe "compareUpstream" $ do
     mapM_
       (\(up, spec, o) -> it (T.unpack up <> " vs spec " <> T.unpack spec) $ compareUpstream up spec `shouldBe` o)
-      [ ("v1.3.0", "1.2.0", GT)
-      , ("v1.2.0", "1.2.0", EQ)
-      , ("1.2.0", "1.3.0", LT)
-      , ("6.0.0-alpha1", "6.0.0~alpha1", EQ)
-      , ("6.0.0", "6.0.0~alpha1", GT)
-      , ("0.4.2", "0.4~2", EQ)
-      , ("2026-07-27", "20260727", EQ)
-      , ("2.005R", "2.005", EQ)
-      , ("3.17.0-ogc1", "3.17.0^1", EQ)
-      , ("6.7.3", "v6.7.3", EQ)
-      , ("0.42.0", "0.41.0^20261031.9e2ed65", GT)
-      -- a snapshot taken after the release it's based on isn't drift
-      , ("0.41.0", "0.41.0^20261031.9e2ed65", EQ)
+      [ ("v1.3.0", "1.2.0", GT),
+        ("v1.2.0", "1.2.0", EQ),
+        ("1.2.0", "1.3.0", LT),
+        ("6.0.0-alpha1", "6.0.0~alpha1", EQ),
+        ("6.0.0", "6.0.0~alpha1", GT),
+        ("0.4.2", "0.4~2", EQ),
+        ("2026-07-27", "20260727", EQ),
+        ("2.005R", "2.005", EQ),
+        ("3.17.0-ogc1", "3.17.0^1", EQ),
+        ("6.7.3", "v6.7.3", EQ),
+        ("0.42.0", "0.41.0^20261031.9e2ed65", GT),
+        -- a snapshot taken after the release it's based on isn't drift
+        ("0.41.0", "0.41.0^20261031.9e2ed65", EQ)
       ]
 
   describe "srpmName" $ do
@@ -191,34 +192,34 @@ posix s = addUTCTime (fromIntegral s) (UTCTime (fromGregorian 1970 1 1) 0)
 pkg :: Package
 pkg =
   Package
-    { pkgName = "zed"
-    , pkgPath = "anda/devs/zed/stable"
-    , pkgSubrepo = Nothing
-    , pkgSpecEVR = Just (EVR 0 "1.2.0" "1.fc44")
-    , pkgRepoBuild = Nothing
-    , pkgLastCommit = Nothing
-    , pkgUpstream = Just (GitHub "zed-industries/zed")
-    , pkgUpstreamVer = Nothing
-    , pkgUpstreamErr = Nothing
+    { pkgName = "zed",
+      pkgPath = "anda/devs/zed/stable",
+      pkgSubrepo = Nothing,
+      pkgSpecEVR = Just (EVR 0 "1.2.0" "1.fc44"),
+      pkgRepoBuild = Nothing,
+      pkgLastCommit = Nothing,
+      pkgUpstream = Just (GitHub "zed-industries/zed"),
+      pkgUpstreamVer = Nothing,
+      pkgUpstreamErr = Nothing
     }
 
 snapshot :: Snapshot
 snapshot =
   Snapshot
-    { snapPackages = Map.singleton "zed" pkg
-    , snapFedora = Set.empty
-    , snapNow = now
-    , snapConfig =
+    { snapPackages = Map.singleton "zed" pkg,
+      snapFedora = Set.empty,
+      snapNow = now,
+      snapConfig =
         Config
-          { cfgMonorepo = "."
-          , cfgTerraRepo = ""
-          , cfgFedoraRepos = []
-          , cfgDist = ".fc44"
-          , cfgStaleAfter = 180 * nominalDay
-          , cfgUpstream = False
-          , cfgCacheFor = 0
-          , cfgConcurrency = 1
-          , cfgGitHubToken = Nothing
+          { cfgMonorepo = ".",
+            cfgTerraRepo = "",
+            cfgFedoraRepos = [],
+            cfgDist = ".fc44",
+            cfgStaleAfter = 180 * nominalDay,
+            cfgUpstream = False,
+            cfgCacheFor = 0,
+            cfgConcurrency = 1,
+            cfgGitHubToken = Nothing
           }
     }
 

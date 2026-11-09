@@ -1,14 +1,15 @@
 -- | the app monad. plain ReaderT over IO is the boring, correct starting point.
 -- reach for mtl classes or an effect library only once this actually hurts
 module Oglyad.App
-  ( Env (..)
-  , App
-  , runApp
-  , httpGet
-  , httpGetE
-  , forConcurrentlyN
-  , note
-  ) where
+  ( Env (..),
+    App,
+    runApp,
+    httpGet,
+    httpGetE,
+    forConcurrentlyN,
+    note,
+  )
+where
 
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (forConcurrently)
@@ -21,14 +22,14 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
 import Network.HTTP.Client
-  ( HttpException (..)
-  , HttpExceptionContent (..)
-  , Manager
-  , Request (requestHeaders)
-  , httpLbs
-  , parseUrlThrow
-  , responseBody
-  , responseStatus
+  ( HttpException (..),
+    HttpExceptionContent (..),
+    Manager,
+    Request (requestHeaders),
+    httpLbs,
+    parseUrlThrow,
+    responseBody,
+    responseStatus,
   )
 import Network.HTTP.Client.TLS (newTlsManager)
 import Network.HTTP.Types (statusCode)
@@ -36,9 +37,10 @@ import Oglyad.Types (Config (..))
 import System.IO (hPutStrLn, stderr)
 
 data Env = Env
-  { envConfig :: Config
-  , envHttp :: Manager
-  , envCratesLock :: MVar () -- ^ crates.io allows one request per second
+  { envConfig :: Config,
+    envHttp :: Manager,
+    -- | crates.io allows one request per second
+    envCratesLock :: MVar ()
   }
 
 type App = ReaderT Env IO
@@ -90,4 +92,3 @@ forConcurrentlyN n xs f = do
     sem <- newQSem (max 1 n)
     forConcurrently xs $ \x ->
       bracket_ (waitQSem sem) (signalQSem sem) (runReaderT (f x) env)
-

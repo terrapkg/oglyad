@@ -1,7 +1,8 @@
 module Oglyad.Report
-  ( renderText
-  , renderJson
-  ) where
+  ( renderText,
+    renderJson,
+  )
+where
 
 import Data.Aeson (encode)
 import Data.ByteString.Lazy qualified as LBS

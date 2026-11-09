@@ -1,13 +1,14 @@
 -- | reads published dnf repodata: repomd.xml → primary.xml.{zst,gz,xz} → packages
 module Oglyad.Source.Repodata
-  ( RpmEntry (..)
-  , fetchPrimary
-  , fetchRepo
-  , parseRepomd
-  , parsePrimary
-  , srpmName
-  , latestBySource
-  ) where
+  ( RpmEntry (..),
+    fetchPrimary,
+    fetchRepo,
+    parseRepomd,
+    parsePrimary,
+    srpmName,
+    latestBySource,
+  )
+where
 
 import Codec.Compression.GZip qualified as GZip
 import Codec.Compression.Lzma qualified as Lzma
@@ -18,6 +19,7 @@ import Control.Monad ((>=>))
 import Control.Monad.Reader (liftIO)
 import Data.Bifunctor (first)
 import Data.ByteString.Lazy qualified as LBS
+import Data.Char (isAlphaNum)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
@@ -27,7 +29,6 @@ import Data.Text.Read qualified as TR
 import Data.Time (UTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Data.XML.Types (Content (..), Event (..))
-import Data.Char (isAlphaNum)
 import Oglyad.App (App, httpGet, note)
 import Oglyad.Source.Cache (loadJson, saveJson)
 import Oglyad.Types (RepoBuild (..))
@@ -38,11 +39,12 @@ import Text.XML.Stream.Parse (parseBytes)
 
 -- | one binary (or source) rpm from primary.xml
 data RpmEntry = RpmEntry
-  { rpmName :: Text
-  , rpmArch :: Text
-  , rpmEVR :: EVR
-  , rpmSourceRpm :: Maybe Text -- ^ e.g. zed-0.190.0-1.fc44.src.rpm, absent on src rpms
-  , rpmBuildTime :: UTCTime
+  { rpmName :: Text,
+    rpmArch :: Text,
+    rpmEVR :: EVR,
+    -- | e.g. zed-0.190.0-1.fc44.src.rpm, absent on src rpms
+    rpmSourceRpm :: Maybe Text,
+    rpmBuildTime :: UTCTime
   }
   deriving stock (Eq, Show)
 
@@ -120,11 +122,11 @@ parseRepomd bs = do
 
 -- | what we've seen so far of the <package> we're currently inside
 data PkgAcc = PkgAcc
-  { accName :: Text
-  , accArch :: Text
-  , accEVR :: Maybe EVR
-  , accTime :: Maybe UTCTime
-  , accSrpm :: Maybe Text
+  { accName :: Text,
+    accArch :: Text,
+    accEVR :: Maybe EVR,
+    accTime :: Maybe UTCTime,
+    accSrpm :: Maybe Text
   }
 
 emptyAcc :: PkgAcc
@@ -135,10 +137,12 @@ data Capture = CapName | CapArch | CapSrpm | CapNone
   deriving stock (Eq)
 
 data St = St
-  { stAcc :: !PkgAcc
-  , stCap :: !Capture
-  , stOut :: [RpmEntry] -- ^ finished packages, newest first
-  , stDepth :: !Int -- ^ open elements, nonzero at the end means a truncated file
+  { stAcc :: !PkgAcc,
+    stCap :: !Capture,
+    -- | finished packages, newest first
+    stOut :: [RpmEntry],
+    -- | open elements, nonzero at the end means a truncated file
+    stDepth :: !Int
   }
 
 -- | parse decompressed primary.xml.

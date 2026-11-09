@@ -21,10 +21,10 @@ import System.Exit (ExitCode (..), exitFailure)
 import System.Process.Typed (proc, readProcessStdout)
 
 data Opts = Opts
-  { optConfig :: Maybe Text -> Int -> Config
-  , optOnly :: [Text]
-  , optJson :: Bool
-  , optMinSev :: Severity
+  { optConfig :: Maybe Text -> Int -> Config,
+    optOnly :: [Text],
+    optJson :: Bool,
+    optMinSev :: Severity
   }
 
 optsP :: Parser Opts
@@ -51,17 +51,17 @@ configP = do
   pure $ \cfgGitHubToken cores ->
     let r = T.pack (show release)
         fedoraRepos =
-          [ "https://dl.fedoraproject.org/pub/fedora/linux/releases/" <> r <> "/Everything/x86_64/os"
-          , "https://dl.fedoraproject.org/pub/fedora/linux/updates/" <> r <> "/Everything/x86_64"
+          [ "https://dl.fedoraproject.org/pub/fedora/linux/releases/" <> r <> "/Everything/x86_64/os",
+            "https://dl.fedoraproject.org/pub/fedora/linux/updates/" <> r <> "/Everything/x86_64"
           ]
      in Config
-          { cfgTerraRepo = maybe ("https://repos.fyralabs.com/terra" <> r) id terraRepo
-          , cfgFedoraRepos = (if fedora then fedoraRepos else []) <> extraFedora
-          , cfgDist = ".fc" <> r
-          , cfgStaleAfter = fromIntegral (staleDays * 86400)
-          , cfgCacheFor = fromIntegral (cacheHours * 3600)
-          , cfgConcurrency = maybe cores id jobs
-          , ..
+          { cfgTerraRepo = maybe ("https://repos.fyralabs.com/terra" <> r) id terraRepo,
+            cfgFedoraRepos = (if fedora then fedoraRepos else []) <> extraFedora,
+            cfgDist = ".fc" <> r,
+            cfgStaleAfter = fromIntegral (staleDays * 86400),
+            cfgCacheFor = fromIntegral (cacheHours * 3600),
+            cfgConcurrency = maybe cores id jobs,
+            ..
           }
 
 -- | GITHUB_TOKEN, or whatever the gh cli is logged in with. the token is only

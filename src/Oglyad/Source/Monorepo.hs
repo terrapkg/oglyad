@@ -1,15 +1,16 @@
 -- | reads a local checkout of terrapkg/packages
 module Oglyad.Source.Monorepo
-  ( PkgDir (..)
-  , SpecInfo (..)
-  , findPackageDirs
-  , hclString
-  , querySpec
-  , lastCommits
-  , headCommit
-  , specFingerprint
-  , macroFingerprint
-  ) where
+  ( PkgDir (..),
+    SpecInfo (..),
+    findPackageDirs,
+    hclString,
+    querySpec,
+    lastCommits,
+    headCommit,
+    specFingerprint,
+    macroFingerprint,
+  )
+where
 
 import Control.Exception (SomeException, try)
 import Control.Monad (filterM, foldM, forM)
@@ -39,16 +40,20 @@ import System.Process.Typed (proc, readProcess)
 
 -- | a directory with an anda.hcl in it
 data PkgDir = PkgDir
-  { pdPath :: FilePath -- ^ relative to the monorepo root
-  , pdSpec :: Maybe FilePath -- ^ relative to the monorepo root
-  , pdSubrepo :: Maybe Text -- ^ `subrepo = "extras"` from the labels block
-  , pdUpdateRhai :: Maybe Text -- ^ file contents
+  { -- | relative to the monorepo root
+    pdPath :: FilePath,
+    -- | relative to the monorepo root
+    pdSpec :: Maybe FilePath,
+    -- | `subrepo = "extras"` from the labels block
+    pdSubrepo :: Maybe Text,
+    -- | file contents
+    pdUpdateRhai :: Maybe Text
   }
   deriving stock (Eq, Show)
 
 data SpecInfo = SpecInfo
-  { siName :: Text
-  , siEVR :: EVR
+  { siName :: Text,
+    siEVR :: EVR
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
@@ -75,10 +80,10 @@ findPackageDirs root = go "anda"
       rhai <- if hasRhai then Just <$> TIO.readFile (abs' </> "update.rhai") else pure Nothing
       pure
         PkgDir
-          { pdPath = rel
-          , pdSpec = (rel </>) <$> maybe fallback Just fromHcl
-          , pdSubrepo = hclString "subrepo" hcl
-          , pdUpdateRhai = rhai
+          { pdPath = rel,
+            pdSpec = (rel </>) <$> maybe fallback Just fromHcl,
+            pdSubrepo = hclString "subrepo" hcl,
+            pdUpdateRhai = rhai
           }
 
 -- | pull the first `key = "value"` out of anda.hcl without a real HCL parser.
@@ -87,10 +92,10 @@ hclString :: Text -> Text -> Maybe Text
 hclString key hcl =
   listToMaybe
     [ T.takeWhile (/= '"') (T.drop 1 (T.dropWhile (/= '"') rest))
-    | l <- map T.strip (T.lines hcl)
-    , Just rest <- [T.stripPrefix key l]
-    , "=" `T.isPrefixOf` T.stripStart rest
-    , "\"" `T.isInfixOf` rest
+    | l <- map T.strip (T.lines hcl),
+      Just rest <- [T.stripPrefix key l],
+      "=" `T.isPrefixOf` T.stripStart rest,
+      "\"" `T.isInfixOf` rest
     ]
 
 -- | let rpm evaluate the spec for us. hand-parsing specs means reimplementing
@@ -100,11 +105,16 @@ querySpec dist spec = do
   let qf = "%{NAME}\t%|EPOCH?{%{EPOCH}}:{0}|:%{VERSION}-%{RELEASE}\n"
   (code, out, err) <-
     readProcess . proc "rpmspec" $
-      [ "-q", "--srpm"
-      , "--define", "dist " <> T.unpack dist
-      -- some specs load macro files from their own dir via %{_sourcedir}
-      , "--define", "_sourcedir " <> takeDirectory spec
-      , "--qf", qf, spec
+      [ "-q",
+        "--srpm",
+        "--define",
+        "dist " <> T.unpack dist,
+        -- some specs load macro files from their own dir via %{_sourcedir}
+        "--define",
+        "_sourcedir " <> takeDirectory spec,
+        "--qf",
+        qf,
+        spec
       ]
   pure $ case code of
     ExitFailure _ -> Left (T.strip (decode err))
@@ -169,9 +179,14 @@ specFingerprint macros dist root rel = do
   let header = TE.encodeUtf8 (macros <> "\0" <> dist <> "\0" <> T.pack rel <> "\0")
   -- feed each file to the hash as its own chunk instead of concatenating
   -- them, which would copy every byte of the package dir once more
-  ctx <- foldM (\c f -> do
-    body <- BS.readFile (dir </> f)
-    pure $! SHA256.updates c [TE.encodeUtf8 (T.pack f), "\0", body, "\0"]) (SHA256.update SHA256.init header) files
+  ctx <-
+    foldM
+      ( \c f -> do
+          body <- BS.readFile (dir </> f)
+          pure $! SHA256.updates c [TE.encodeUtf8 (T.pack f), "\0", body, "\0"]
+      )
+      (SHA256.update SHA256.init header)
+      files
   pure (TE.decodeUtf8 (B16.encode (SHA256.finalize ctx)))
 
 -- | fingerprint of the system's rpm macro setup (names, sizes and mtimes of

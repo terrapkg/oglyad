@@ -13,14 +13,15 @@
 -- become 'Derived'. anything fancier, like custom get_json scraping, ends up as
 -- 'Unknown', and the unparsed-rhai check lists those
 module Oglyad.Source.Rhai
-  ( parseUpdateRhai
-  , Token (..)
-  , tokenize
-  ) where
+  ( parseUpdateRhai,
+    Token (..),
+    tokenize,
+  )
+where
 
 import Data.Char (isAlphaNum, isDigit, isSpace)
-import Data.Maybe (listToMaybe, mapMaybe)
 import Data.List (nub)
+import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Void (Void)
@@ -62,12 +63,12 @@ tokenP :: Parser Token
 tokenP =
   L.lexeme sc $
     choice
-      [ TStr <$> quoted '"'
-      , TStr <$> raw -- template strings, ${} left as-is
-      , TStr <$> quoted '\'' -- char literals
-      , TIdent <$> takeWhile1P (Just "identifier") (\c -> isAlphaNum c || c == '_')
-      , TNum <$> takeWhile1P (Just "number") isDigit
-      , TSym <$> satisfy (not . isSpace)
+      [ TStr <$> quoted '"',
+        TStr <$> raw, -- template strings, ${} left as-is
+        TStr <$> quoted '\'', -- char literals
+        TIdent <$> takeWhile1P (Just "identifier") (\c -> isAlphaNum c || c == '_'),
+        TNum <$> takeWhile1P (Just "number") isDigit,
+        TSym <$> satisfy (not . isSpace)
       ]
   where
     -- backtick strings are raw in Rhai, so regexes like `[\d.]+` stay intact
@@ -94,8 +95,8 @@ versionExprs = \case
   TIdent "rpm" : TSym '.' : TIdent "version" : TSym '(' : rest ->
     argsOf rest <> versionExprs rest
   TIdent "rpm" : TSym '.' : TIdent f : TSym '(' : TStr key : TSym ',' : rest
-    | f `elem` ["global", "define"]
-    , key `elem` ["ver", "version"] ->
+    | f `elem` ["global", "define"],
+      key `elem` ["ver", "version"] ->
         argsOf' rest <> versionExprs rest
   _ : rest -> versionExprs rest
   where
@@ -141,9 +142,10 @@ resolveExpr toks fuel expr
 splitArgs :: [Token] -> [[Token]]
 splitArgs toks = case takeBalanced toks of
   [] -> []
-  arg -> arg : case drop (length arg) toks of
-    TSym ',' : rest -> splitArgs rest
-    _ -> []
+  arg ->
+    arg : case drop (length arg) toks of
+      TSym ',' : rest -> splitArgs rest
+      _ -> []
 
 -- | the right-hand side of `let v = ...;` (first binding wins)
 letBinding :: Text -> [Token] -> Maybe [Token]
@@ -194,8 +196,13 @@ sourceCall = \case
 -- | helpers whose version follows something other than an upstream release
 derivedHelpers :: [Text]
 derivedHelpers =
-  [ "bodhi", "bodhi_vr", "madoguchi", "alma"
-  , "nvidia_driver_version", "nvidia_legacy_version", "nvidia_component_version"
+  [ "bodhi",
+    "bodhi_vr",
+    "madoguchi",
+    "alma",
+    "nvidia_driver_version",
+    "nvidia_legacy_version",
+    "nvidia_component_version"
   ]
 
 allSources :: [Token] -> [UpstreamSource]

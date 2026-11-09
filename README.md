@@ -65,6 +65,16 @@ everything lives in `~/.cache/oglyad`.
 a run with warm caches takes about 0.4s. a cold run takes about 5s, almost
 all of it in rpmspec.
 
+## formatting
+
+code is formatted with [ormolu](https://github.com/tweag/ormolu) 0.9.0.0, and
+CI fails on unformatted files. install the matching version from its
+[release page](https://github.com/tweag/ormolu/releases/tag/0.9.0.0), then:
+
+```sh
+ormolu --mode inplace $(git ls-files '*.hs')
+```
+
 ## license
 
 GPL-3.0-or-later. see [LICENSE](LICENSE).

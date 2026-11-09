@@ -1,12 +1,13 @@
 -- | small json caches under $XDG_CACHE_HOME/oglyad, so reruns skip work that
 -- can't have changed: spec evaluation, repodata parsing and upstream lookups
 module Oglyad.Source.Cache
-  ( loadJson
-  , saveJson
-  , CacheEntry (..)
-  , UpstreamCache
-  , lookupFresh
-  ) where
+  ( loadJson,
+    saveJson,
+    CacheEntry (..),
+    UpstreamCache,
+    lookupFresh,
+  )
+where
 
 import Control.Exception (SomeException, try)
 import Data.Aeson (FromJSON, ToJSON, eitherDecodeFileStrict, encodeFile)
@@ -24,14 +25,14 @@ cacheDir :: IO FilePath
 cacheDir = getXdgDirectory XdgCache "oglyad"
 
 -- | a missing or corrupt cache file is just a cache miss
-loadJson :: forall a. FromJSON a => FilePath -> IO (Maybe a)
+loadJson :: forall a. (FromJSON a) => FilePath -> IO (Maybe a)
 loadJson name = do
   path <- (</> name) <$> cacheDir
   r <- try (eitherDecodeFileStrict path) :: IO (Either SomeException (Either String a))
   pure (either (const Nothing) (either (const Nothing) Just) r)
 
 -- | write to a temp file then rename, so a ctrl-c mid-write can't corrupt it
-saveJson :: ToJSON a => FilePath -> a -> IO ()
+saveJson :: (ToJSON a) => FilePath -> a -> IO ()
 saveJson name x = do
   dir <- cacheDir
   createDirectoryIfMissing True dir
@@ -40,8 +41,8 @@ saveJson name x = do
   renameFile (path <> ".tmp") path
 
 data CacheEntry = CacheEntry
-  { ceFetched :: UTCTime
-  , ceResult :: Either Text Text
+  { ceFetched :: UTCTime,
+    ceResult :: Either Text Text
   }
   deriving stock (Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
