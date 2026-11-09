@@ -31,14 +31,20 @@ loadJson name = do
   r <- try (eitherDecodeFileStrict path) :: IO (Either SomeException (Either String a))
   pure (either (const Nothing) (either (const Nothing) Just) r)
 
--- | write to a temp file then rename, so a ctrl-c mid-write can't corrupt it
+-- | write to a temp file then rename, so a ctrl-c mid-write can't corrupt it.
+-- caching is best effort: if the write fails (full disk, read-only home) the
+-- run carries on and just won't be faster next time
 saveJson :: (ToJSON a) => FilePath -> a -> IO ()
 saveJson name x = do
-  dir <- cacheDir
-  createDirectoryIfMissing True dir
-  let path = dir </> name
-  encodeFile (path <> ".tmp") x
-  renameFile (path <> ".tmp") path
+  r <- try $ do
+    dir <- cacheDir
+    createDirectoryIfMissing True dir
+    let path = dir </> name
+    encodeFile (path <> ".tmp") x
+    renameFile (path <> ".tmp") path
+  case r of
+    Left (_ :: SomeException) -> pure ()
+    Right () -> pure ()
 
 data CacheEntry = CacheEntry
   { ceFetched :: UTCTime,

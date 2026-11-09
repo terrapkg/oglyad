@@ -6,9 +6,9 @@ import Data.Text qualified as T
 import Oglyad.Types
 
 check :: Check
-check _ Package {..} = case pkgUpstream of
+check _ p@Package {..} = case pkgUpstream of
   Just (Unknown raw) ->
-    [Finding "unparsed-rhai" pkgName Info ("can't parse update.rhai: " <> T.take 80 (head' (T.lines raw)))]
+    [finding "unparsed-rhai" p Info ("can't parse update.rhai: " <> T.take 80 (head' (T.lines raw)))]
   _ -> []
   where
     head' (l : _) = l

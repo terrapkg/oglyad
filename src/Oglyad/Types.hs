@@ -6,6 +6,7 @@ module Oglyad.Types
     RepoBuild (..),
     Severity (..),
     Finding (..),
+    finding,
     Snapshot (..),
     Config (..),
     Check,
@@ -16,6 +17,7 @@ import Data.Aeson (FromJSON, ToJSON (..), Value (String))
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
+import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime)
 import GHC.Generics (Generic)
 import Oglyad.Version (EVR (..))
@@ -108,11 +110,25 @@ instance ToJSON Severity where
 data Finding = Finding
   { fCheck :: Text,
     fPackage :: Text,
+    -- | the package's directory in the monorepo. package names aren't unique
+    -- (see the duplicate-name check), so this is what identifies it
+    fPath :: Maybe Text,
     fSeverity :: Severity,
     fMessage :: Text
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
+
+-- | a finding about a package
+finding :: Text -> Package -> Severity -> Text -> Finding
+finding check p sev msg =
+  Finding
+    { fCheck = check,
+      fPackage = pkgName p,
+      fPath = Just (T.pack (pkgPath p)),
+      fSeverity = sev,
+      fMessage = msg
+    }
 
 data Config = Config
   { -- | local checkout of terrapkg/packages
@@ -137,7 +153,8 @@ data Config = Config
 -- | everything a check is allowed to look at, already collected.
 -- checks never do IO, which is what keeps them trivially testable
 data Snapshot = Snapshot
-  { snapPackages :: Map Text Package,
+  { -- | keyed by monorepo path, since names can repeat
+    snapPackages :: Map FilePath Package,
     -- | source package names present in Fedora
     snapFedora :: Set Text,
     snapNow :: UTCTime,

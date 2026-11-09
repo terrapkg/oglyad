@@ -1,7 +1,6 @@
 -- | reads published dnf repodata: repomd.xml → primary.xml.{zst,gz,xz} → packages
 module Oglyad.Source.Repodata
   ( RpmEntry (..),
-    fetchPrimary,
     fetchRepo,
     parseRepomd,
     parsePrimary,
@@ -29,7 +28,7 @@ import Data.Text.Read qualified as TR
 import Data.Time (UTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Data.XML.Types (Content (..), Event (..))
-import Oglyad.App (App, httpGet, note)
+import Oglyad.App (App, httpGetE, note)
 import Oglyad.Source.Cache (loadJson, saveJson)
 import Oglyad.Types (RepoBuild (..))
 import Oglyad.Version (EVR (..))
@@ -54,8 +53,8 @@ data RpmEntry = RpmEntry
 fetchRepo :: Text -> App (Either String (Map Text RepoBuild))
 fetchRepo base = do
   let file = "repodata-" <> T.unpack (T.map (\c -> if isAlphaNum c then c else '_') base) <> ".json"
-  repomd <- httpGet (base <> "/repodata/repomd.xml")
-  case parseRepomd repomd of
+  repomd <- httpGetE (base <> "/repodata/repomd.xml")
+  case first T.unpack repomd >>= parseRepomd of
     Left err -> pure (Left err)
     Right href ->
       liftIO (loadJson file) >>= \case
@@ -68,18 +67,13 @@ fetchRepo base = do
             Left _ -> pure ()
           pure r
 
--- | fetch and parse primary.xml for a repo base url
-fetchPrimary :: Text -> App (Either String [RpmEntry])
-fetchPrimary base = do
-  repomd <- httpGet (base <> "/repodata/repomd.xml")
-  either (pure . Left) (fetchPrimaryAt base) (parseRepomd repomd)
-
+-- | fetch and parse the primary.xml at a href from repomd.xml
 fetchPrimaryAt :: Text -> Text -> App (Either String [RpmEntry])
 fetchPrimaryAt base href = do
-  compressed <- httpGet (base <> "/" <> href)
-  case decompressorFor href of
+  download <- httpGetE (base <> "/" <> href)
+  case (,) <$> first T.unpack download <*> decompressorFor href of
     Left err -> pure (Left err)
-    Right decompress -> do
+    Right (compressed, decompress) -> do
       -- decompression is lazy, so a corrupt archive only explodes once
       -- the parser pulls on it. force the whole parse here so that
       -- explosion turns into a Left instead of crashing the program later

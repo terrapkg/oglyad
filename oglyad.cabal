@@ -49,12 +49,14 @@ library
     Oglyad.Check
     Oglyad.Check.BuildLag
     Oglyad.Check.Drift
+    Oglyad.Check.DuplicateName
     Oglyad.Check.FedoraOverlap
     Oglyad.Check.NoAutoupdate
     Oglyad.Check.Stale
     Oglyad.Check.UnparsedRhai
     Oglyad.Check.UpstreamError
     Oglyad.Collect
+    Oglyad.Process
     Oglyad.Report
     Oglyad.Source.Cache
     Oglyad.Source.Monorepo
@@ -93,6 +95,8 @@ executable oglyad
   ghc-options:    -threaded -rtsopts "-with-rtsopts=-N4"
   build-depends:
     , bytestring
+    , directory
+    , filepath
     , oglyad
     , optparse-applicative
     , typed-process
@@ -104,6 +108,10 @@ test-suite oglyad-test
   main-is:        Spec.hs
   build-depends:
     , bytestring
+    , directory
+    , filepath
     , hspec
     , oglyad
     , QuickCheck
+    , temporary
+    , typed-process

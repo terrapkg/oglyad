@@ -10,17 +10,14 @@ import Control.Monad.Reader (liftIO)
 import Data.Aeson (Value (..), eitherDecode)
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
-import Data.ByteString.Lazy qualified as LBS
 import Data.List (maximumBy)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Text.Encoding qualified as TE
 import Data.Vector qualified as V
 import Oglyad.App (App, httpGetE)
+import Oglyad.Process (run)
 import Oglyad.Types (CrateField (..), UpstreamSource (..))
 import Oglyad.Version (normalizeVersion, rpmvercmp)
-import System.Exit (ExitCode (..))
-import System.Process.Typed (proc, readProcess)
 
 -- | a step into a json document: an object key or an array index
 data Step = K Text | I Int
@@ -96,10 +93,9 @@ opam name = do
 -- `git ls-remote` speaks the smart http protocol, so nothing gets cloned
 gitTags :: Text -> IO (Either Text Text)
 gitTags url = do
-  (code, out, err) <- readProcess (proc "git" ["ls-remote", "--tags", "--refs", T.unpack url])
-  let decode = TE.decodeUtf8Lenient . LBS.toStrict
-      tags = [t | l <- T.lines (decode out), Just t <- [T.stripPrefix "refs/tags/" (T.takeWhileEnd (/= '\t') l)]]
-  pure $ case (code, tags) of
-    (ExitFailure _, _) -> Left ("git ls-remote failed for " <> url <> ": " <> T.strip (decode err))
-    (_, []) -> Left ("no tags at " <> url)
-    _ -> Right (maximumBy (\a b -> rpmvercmp (normalizeVersion a) (normalizeVersion b)) tags)
+  out <- run "git" ["ls-remote", "--tags", "--refs", T.unpack url]
+  pure $ case out of
+    Left err -> Left ("git ls-remote failed for " <> url <> ": " <> err)
+    Right o -> case [t | l <- T.lines o, Just t <- [T.stripPrefix "refs/tags/" (T.takeWhileEnd (/= '\t') l)]] of
+      [] -> Left ("no tags at " <> url)
+      tags -> Right (maximumBy (\a b -> rpmvercmp (normalizeVersion a) (normalizeVersion b)) tags)

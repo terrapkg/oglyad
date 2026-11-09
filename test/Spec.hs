@@ -1,19 +1,30 @@
 module Main (main) where
 
+import Control.Exception (bracket)
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime (..), addUTCTime, fromGregorian, nominalDay)
+import Oglyad.App (runApp)
+import Oglyad.Check (parseCheckName)
 import Oglyad.Check.Drift qualified as Drift
+import Oglyad.Check.DuplicateName qualified as DuplicateName
 import Oglyad.Check.FedoraOverlap qualified as FedoraOverlap
 import Oglyad.Check.Stale qualified as Stale
-import Oglyad.Source.Monorepo (hclString)
-import Oglyad.Source.Repodata (RpmEntry (..), latestBySource, parsePrimary, srpmName)
+import Oglyad.Process (run)
+import Oglyad.Report (renderText)
+import Oglyad.Source.Monorepo (hclString, lastCommits, macroFingerprint)
+import Oglyad.Source.Repodata (RpmEntry (..), fetchRepo, latestBySource, parsePrimary, srpmName)
 import Oglyad.Source.Rhai (parseUpdateRhai)
 import Oglyad.Types
 import Oglyad.Version
+import System.Directory (createDirectoryIfMissing)
+import System.Environment (lookupEnv, setEnv, unsetEnv)
+import System.FilePath ((</>))
+import System.IO.Temp (withSystemTempDirectory)
+import System.Process.Typed (proc, runProcess_, setEnv)
 import Test.Hspec
 import Test.QuickCheck
 
@@ -150,6 +161,64 @@ main = hspec $ do
     it "is quiet when Fedora doesn't have it" $
       FedoraOverlap.check snapshot pkg `shouldBe` []
 
+  describe "duplicate-name check" $ do
+    let other = pkg {pkgPath = "anda/devs/zed/nightly"}
+        twoOf a b = snapshot {snapPackages = Map.fromList [(pkgPath a, a), (pkgPath b, b)]}
+    it "flags two dirs building the same name into one repo" $
+      severities (DuplicateName.check (twoOf pkg other) pkg) `shouldBe` [Warn]
+    it "allows the same name in different subrepos" $
+      DuplicateName.check (twoOf pkg other {pkgSubrepo = Just "extras"}) pkg `shouldBe` []
+    it "is quiet for unique names" $
+      DuplicateName.check snapshot pkg `shouldBe` []
+
+  describe "report" $ do
+    let f path = Finding "build-lag" "zed" (Just path) Warn "x"
+    it "shows the directory when a name is ambiguous" $
+      renderText Info [f "anda/a", f "anda/b"] `shouldSatisfy` T.isInfixOf "zed (anda/a): x"
+    it "keeps it short otherwise" $
+      renderText Info [f "anda/a"] `shouldSatisfy` T.isInfixOf "zed: x"
+
+  describe "parseCheckName" $ do
+    it "accepts known checks" $ parseCheckName "build-lag" `shouldBe` Right "build-lag"
+    it "rejects typos instead of silently running nothing" $
+      parseCheckName "buildlag" `shouldSatisfy` either (const True) (const False)
+
+  describe "failure handling" $ do
+    it "turns a missing executable into a Left" $ do
+      r <- run "oglyad-definitely-not-a-real-command" []
+      r `shouldSatisfy` either (const True) (const False)
+    it "turns an unreachable repo into a Left instead of throwing" $ do
+      -- port 9 (discard) on loopback: refused immediately, no network needed
+      r <- runApp (snapConfig snapshot) (fetchRepo "http://127.0.0.1:9/repo")
+      r `shouldSatisfy` either (const True) (const False)
+
+  describe "macroFingerprint" $
+    it "changes when ~/.rpmmacros changes" $
+      withSystemTempDirectory "oglyad-home" $ \home ->
+        withEnv "HOME" home $ withEnv "XDG_CONFIG_HOME" (home </> ".config") $ do
+          fpBefore <- macroFingerprint
+          writeFile (home </> ".rpmmacros") "%dist .fc99\n"
+          fpAfter <- macroFingerprint
+          fpAfter `shouldNotBe` fpBefore
+
+  describe "lastCommits" $
+    it "reads commit times, including UTC ones git prints with a Z" $
+      withSystemTempDirectory "oglyad-git" $ \repo -> do
+        let git env args =
+              runProcess_ . System.Process.Typed.setEnv (env <> [("GIT_CONFIG_GLOBAL", "/dev/null"), ("GIT_CONFIG_NOSYSTEM", "1")]) $
+                proc "git" (["-C", repo, "-c", "user.name=t", "-c", "user.email=t@t", "-c", "commit.gpgsign=false"] <> args)
+            commitAt date dir = do
+              createDirectoryIfMissing True (repo </> dir)
+              writeFile (repo </> dir </> "anda.hcl") date
+              git [] ["add", "-A"]
+              git [("GIT_COMMITTER_DATE", date), ("GIT_AUTHOR_DATE", date)] ["commit", "-q", "-m", dir]
+        git [] ["init", "-q"]
+        commitAt "2026-01-02T03:04:05Z" "anda/a"
+        commitAt "2026-02-03T04:05:06+08:00" "anda/b"
+        m <- lastCommits repo ["anda/a", "anda/b"]
+        Map.lookup "anda/a" m `shouldBe` Just (UTCTime (fromGregorian 2026 1 2) (3 * 3600 + 4 * 60 + 5))
+        Map.lookup "anda/b" m `shouldBe` Just (UTCTime (fromGregorian 2026 2 2) (20 * 3600 + 5 * 60 + 6))
+
   describe "stale check" $ do
     let built daysAgo = Just (RepoBuild (EVR 0 "1.2.0" "1.fc44") (addUTCTime (negate (daysAgo * nominalDay)) now))
     it "is quiet for recent builds" $
@@ -206,7 +275,7 @@ pkg =
 snapshot :: Snapshot
 snapshot =
   Snapshot
-    { snapPackages = Map.singleton "zed" pkg,
+    { snapPackages = Map.singleton (pkgPath pkg) pkg,
       snapFedora = Set.empty,
       snapNow = now,
       snapConfig =
@@ -254,3 +323,11 @@ newtype V = V Text deriving stock (Show)
 instance Arbitrary V where
   arbitrary = V . T.pack <$> listOf (elements "0123456789abz.~^_")
   shrink (V t) = V . T.pack <$> shrink (T.unpack t)
+
+-- | set an environment variable for the duration of an action
+withEnv :: String -> String -> IO a -> IO a
+withEnv key val act =
+  bracket
+    (lookupEnv key <* System.Environment.setEnv key val)
+    (maybe (unsetEnv key) (System.Environment.setEnv key))
+    (const act)

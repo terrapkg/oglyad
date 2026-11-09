@@ -22,6 +22,7 @@ upstream lookups use `GITHUB_TOKEN`, or `gh auth token` when that's unset.
 |---|---|---|
 | `build-lag` | error / warn / info | never published, merged but not built, or the repo is newer than your checkout |
 | `drift` | warn | upstream released something newer than the spec (`-u`) |
+| `duplicate-name` | warn | two directories build the same package name into the same repo, so they overwrite each other |
 | `stale` | info, warn with `-u` | last build is older than `--stale-days`, warn if upstream also moved on |
 | `upstream-error` | warn | the upstream from update.rhai 404s or fails, so `anda update` is failing too |
 | `fedora-overlap` | warn | Fedora ships the same source package (`--fedora`). subrepos are exempt |

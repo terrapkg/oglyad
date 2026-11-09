@@ -5,6 +5,6 @@ module Oglyad.Check.UpstreamError (check) where
 import Oglyad.Types
 
 check :: Check
-check _ Package {..} = case pkgUpstreamErr of
-  Just err -> [Finding "upstream-error" pkgName Warn err]
+check _ p@Package {..} = case pkgUpstreamErr of
+  Just err -> [finding "upstream-error" p Warn err]
   Nothing -> []

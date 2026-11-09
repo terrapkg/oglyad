@@ -5,19 +5,22 @@
 module Main (main) where
 
 import Control.Exception (SomeException, try)
+import Control.Monad (unless)
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.IO qualified as TIO
 import GHC.Conc (getNumProcessors)
 import Oglyad.App (runApp)
-import Oglyad.Check (allChecks, runChecks)
+import Oglyad.Check (checkNames, parseCheckName, runChecks)
 import Oglyad.Collect (buildSnapshot)
 import Oglyad.Report (renderJson, renderText)
 import Oglyad.Types
 import Options.Applicative
+import System.Directory (doesDirectoryExist)
 import System.Environment (lookupEnv)
-import System.Exit (ExitCode (..), exitFailure)
+import System.Exit (ExitCode (..), die, exitFailure)
+import System.FilePath ((</>))
 import System.Process.Typed (proc, readProcessStdout)
 
 data Opts = Opts
@@ -30,12 +33,12 @@ data Opts = Opts
 optsP :: Parser Opts
 optsP = Opts <$> configP <*> onlyP <*> jsonP <*> minSevP
   where
-    onlyP = many (strOption (long "only" <> metavar "CHECK" <> help ("run only this check, repeatable. one of: " <> checkNames)))
+    onlyP = many (option (eitherReader parseCheckName) (long "only" <> metavar "CHECK" <> help ("run only this check, repeatable. one of: " <> names)))
     jsonP = switch (long "json" <> help "emit findings as JSON")
     minSevP =
       flag' Info (long "verbose" <> short 'v' <> help "show info findings too")
         <|> pure Warn
-    checkNames = T.unpack (T.intercalate ", " (map fst allChecks))
+    names = T.unpack (T.intercalate ", " checkNames)
 
 configP :: Parser (Maybe Text -> Int -> Config)
 configP = do
@@ -82,6 +85,9 @@ main = do
   token <- githubToken
   cores <- getNumProcessors
   let cfg = optConfig token cores
+  hasAnda <- doesDirectoryExist (cfgMonorepo cfg </> "anda")
+  unless hasAnda $
+    die ("oglyad: " <> cfgMonorepo cfg <> " doesn't look like a terrapkg/packages checkout (no anda/ directory). point -m at one")
   (snap, collectFindings) <- runApp cfg buildSnapshot
   let findings = collectFindings <> runChecks optOnly snap
   if optJson

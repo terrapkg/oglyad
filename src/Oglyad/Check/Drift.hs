@@ -17,13 +17,13 @@ drift Package {..} = do
 -- by default
 check :: Check
 check _ p@Package {..} = case drift p of
-  Just (up, spec, GT) -> [finding Warn ("upstream has " <> up <> ", spec is at " <> spec)]
+  Just (up, spec, GT) -> [finding' Warn ("upstream has " <> up <> ", spec is at " <> spec)]
   Just (up, spec, LT)
     -- spec ahead of upstream. snapshots (Version: 1.2^20251101git...) built
     -- after the 1.2 release always look like this and are fine. anything else
     -- usually means a tag that normalizes badly
     | T.any (== '^') spec -> []
-    | otherwise -> [finding Info ("spec " <> spec <> " is ahead of upstream " <> up <> ", check tag normalization")]
+    | otherwise -> [finding' Info ("spec " <> spec <> " is ahead of upstream " <> up <> ", check tag normalization")]
   _ -> []
   where
-    finding sev msg = Finding {fCheck = "drift", fPackage = pkgName, fSeverity = sev, fMessage = msg}
+    finding' = finding "drift" p

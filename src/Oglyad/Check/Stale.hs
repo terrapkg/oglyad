@@ -15,7 +15,7 @@ check Snapshot {..} p@Package {..} = case pkgRepoBuild of
   Nothing -> [] -- never published is build-lag's job
   Just RepoBuild {..}
     | diffUTCTime snapNow rbBuildTime < cfgStaleAfter snapConfig -> []
-    | otherwise -> [Finding "stale" pkgName sev msg]
+    | otherwise -> [finding "stale" p sev msg]
     where
       upstreamMoved = case drift p of
         Just (_, _, GT) -> True

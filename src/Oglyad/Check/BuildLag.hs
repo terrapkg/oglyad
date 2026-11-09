@@ -5,18 +5,18 @@ import Oglyad.Types
 import Oglyad.Version (compareEVR, renderEVR)
 
 check :: Check
-check _ Package {..} = case (pkgSpecEVR, pkgRepoBuild) of
+check _ p@Package {..} = case (pkgSpecEVR, pkgRepoBuild) of
   (Just spec, Nothing) ->
-    [finding Error ("never published (spec is at " <> renderEVR spec <> ")")]
+    [finding' Error ("never published (spec is at " <> renderEVR spec <> ")")]
   (Just spec, Just RepoBuild {rbEVR = repo})
     | spec == repo -> []
     | otherwise -> case compareEVR spec repo of
         -- merged but not built: the build failed or is still queued
-        GT -> [finding Warn ("spec is at " <> renderEVR spec <> " but repo has " <> renderEVR repo)]
+        GT -> [finding' Warn ("spec is at " <> renderEVR spec <> " but repo has " <> renderEVR repo)]
         -- the repo is newer than git, so the monorepo checkout is behind
-        LT -> [finding Info ("repo has " <> renderEVR repo <> " but spec is at " <> renderEVR spec <> ", is the checkout up to date?")]
+        LT -> [finding' Info ("repo has " <> renderEVR repo <> " but spec is at " <> renderEVR spec <> ", is the checkout up to date?")]
         -- same version spelled differently, e.g. 1.05 vs 1.5
         EQ -> []
   _ -> []
   where
-    finding sev msg = Finding {fCheck = "build-lag", fPackage = pkgName, fSeverity = sev, fMessage = msg}
+    finding' = finding "build-lag" p

@@ -22,7 +22,7 @@ import Oglyad.Source.Repodata (fetchRepo)
 import Oglyad.Source.Rhai (parseUpdateRhai)
 import Oglyad.Source.Upstream (latestVersion)
 import Oglyad.Types
-import System.Directory (makeAbsolute)
+import System.Directory (findExecutable, makeAbsolute)
 import System.FilePath ((</>))
 
 -- | collect everything. problems along the way become findings instead of
@@ -54,7 +54,7 @@ buildSnapshot = do
 
   let snap =
         Snapshot
-          { snapPackages = Map.fromList [(pkgName p, p) | p <- pkgs],
+          { snapPackages = Map.fromList [(pkgPath p, p) | p <- pkgs],
             snapFedora = foldMap Map.keysSet fedora,
             snapNow = now,
             snapConfig = cfg
@@ -89,15 +89,34 @@ readPackages dirs = do
     pure (key, d)
   let misses = length [() | (k, _) <- keyed, isNothing (Map.lookup k (cache :: Map Text (Either Text SpecInfo)))]
   note ("evaluating " <> show (length dirs) <> " specs, " <> show (length dirs - misses) <> " unchanged since last run")
+  -- without rpmspec, cached evaluations still work. everything else is
+  -- skipped and reported once, rather than as one error per package
+  hasRpmspec <- liftIO (isJust <$> findExecutable "rpmspec")
   results <- forConcurrentlyN cfgConcurrency keyed $ \(key, d) -> liftIO $ do
-    info <- case (Map.lookup key cache, pdSpec d) of
-      (Just cached, _) -> pure (Just cached)
-      (Nothing, Just spec) -> Just <$> querySpec cfgDist (root </> spec)
-      (Nothing, Nothing) -> pure Nothing
-    pure (key, info, toPackage commits d info)
+    case (Map.lookup key cache, pdSpec d) of
+      (Just cached, _) -> pure (Evaluated key d cached)
+      (Nothing, Just spec)
+        | hasRpmspec -> Evaluated key d <$> querySpec cfgDist (root </> spec)
+        | otherwise -> pure Skipped
+      (Nothing, Nothing) -> pure (NoSpec d)
   -- keep only entries for packages that still exist, so the file can't grow forever
-  liftIO (saveJson "specs.json" (Map.fromList [(k, i) | (k, Just i, _) <- results]))
-  pure (partitionEithers [r | (_, _, r) <- results])
+  liftIO (saveJson "specs.json" (Map.fromList [(k, i) | Evaluated k _ i <- results]))
+  let skipped = length [() | Skipped <- results]
+      missing =
+        [ collectErr "rpmspec" ("rpmspec not found, install rpm-build. skipped " <> T.pack (show skipped) <> " specs with no cached result")
+        | skipped > 0
+        ]
+      (errs, pkgs) =
+        partitionEithers $
+          [toPackage commits d (Just i) | Evaluated _ d i <- results]
+            <> [toPackage commits d Nothing | NoSpec d <- results]
+  pure (missing <> errs, pkgs)
+
+-- | what happened to one package dir's spec
+data SpecResult
+  = Evaluated Text PkgDir (Either Text SpecInfo)
+  | NoSpec PkgDir
+  | Skipped
 
 -- | last commit per package dir, reused as long as HEAD hasn't moved.
 -- uncommitted changes can't change any "last commit", so HEAD is the whole key
@@ -114,8 +133,8 @@ commitTimes root dirs = do
 
 toPackage :: Map FilePath UTCTime -> PkgDir -> Maybe (Either Text SpecInfo) -> Either Finding Package
 toPackage commits PkgDir {..} = \case
-  Nothing -> Left (collectErr (T.pack pdPath) "no spec file found")
-  Just (Left err) -> Left (collectErr (T.pack pdPath) ("rpmspec failed: " <> firstLine err))
+  Nothing -> Left (pathErr "no spec file found")
+  Just (Left err) -> Left (pathErr ("rpmspec failed: " <> firstLine err))
   Just (Right SpecInfo {..}) ->
     Right
       Package
@@ -131,6 +150,7 @@ toPackage commits PkgDir {..} = \case
         }
   where
     firstLine t = let l = T.takeWhile (/= '\n') t in if T.null l then "(no output)" else l
+    pathErr msg = (collectErr (T.pack pdPath) msg) {fPath = Just (T.pack pdPath)}
 
 -- | fill in upstream versions, from the cache when it's fresh enough
 withUpstreams :: UTCTime -> [Package] -> App [Package]
@@ -143,10 +163,11 @@ withUpstreams now pkgs = do
       fresh p = pkgUpstream p >>= \src -> lookupFresh cfgCacheFor now src cache
   note ("querying upstreams for " <> show (length wanted) <> " packages, " <> show (length (filter (isJust . fresh) wanted)) <> " cached")
   results <- forConcurrentlyN cfgConcurrency wanted $ \p -> case (fresh p, pkgUpstream p) of
-    (Just e, _) -> pure (pkgName p, ceResult e)
-    (Nothing, Just src) -> (pkgName p,) <$> latestVersion src
-    (Nothing, Nothing) -> pure (pkgName p, Left "no source")
-  let byName = Map.fromList results :: Map Text (Either Text Text)
+    (Just e, _) -> pure (pkgPath p, ceResult e)
+    (Nothing, Just src) -> (pkgPath p,) <$> latestVersion src
+    (Nothing, Nothing) -> pure (pkgPath p, Left "no source")
+  -- keyed by path, not name: two dirs can share a package name
+  let byPath = Map.fromList results :: Map FilePath (Either Text Text)
       -- only cache successes. errors are often transient (rate limits, timeouts)
       new =
         Map.fromList
@@ -154,11 +175,11 @@ withUpstreams now pkgs = do
           | p <- wanted,
             isNothing (fresh p),
             Just src <- [pkgUpstream p],
-            Just (Right v) <- [Map.lookup (pkgName p) byName]
+            Just (Right v) <- [Map.lookup (pkgPath p) byPath]
           ]
   liftIO (saveJson "upstream.json" (new <> cache))
   pure
-    [ case Map.lookup (pkgName p) byName of
+    [ case Map.lookup (pkgPath p) byPath of
         Just (Right v) -> p {pkgUpstreamVer = Just v}
         Just (Left e) -> p {pkgUpstreamErr = Just e}
         Nothing -> p
@@ -172,4 +193,4 @@ withUpstreams now pkgs = do
       _ -> True
 
 collectErr :: Text -> Text -> Finding
-collectErr what msg = Finding {fCheck = "collect", fPackage = what, fSeverity = Error, fMessage = msg}
+collectErr what msg = Finding {fCheck = "collect", fPackage = what, fPath = Nothing, fSeverity = Error, fMessage = msg}

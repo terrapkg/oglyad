@@ -7,8 +7,8 @@ import Oglyad.Types
 -- | subrepos (extras, mesa, multimedia, nvidia) exist to ship replacements
 -- for Fedora packages, so overlap there is the whole point
 check :: Check
-check Snapshot {..} Package {..}
+check Snapshot {..} p@Package {..}
   | Just _ <- pkgSubrepo = []
   | pkgName `Set.member` snapFedora =
-      [Finding "fedora-overlap" pkgName Warn "also shipped by Fedora"]
+      [finding "fedora-overlap" p Warn "also shipped by Fedora"]
   | otherwise = []

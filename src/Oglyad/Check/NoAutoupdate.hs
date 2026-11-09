@@ -4,6 +4,6 @@ module Oglyad.Check.NoAutoupdate (check) where
 import Oglyad.Types
 
 check :: Check
-check _ Package {..} = case pkgUpstream of
-  Nothing -> [Finding "no-autoupdate" pkgName Info "no update.rhai, updates are manual"]
+check _ p@Package {..} = case pkgUpstream of
+  Nothing -> [finding "no-autoupdate" p Info "no update.rhai, updates are manual"]
   Just _ -> []
