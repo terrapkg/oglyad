@@ -18,15 +18,31 @@ jobs:
   format:
     name: formatting
     runs-on: ubuntu-latest
+    env:
+      # keep in sync with the ormolu in ~/.local/bin, which Zed formats with.
+      # the hash is the digest GitHub publishes for the release asset
+      ORMOLU_VERSION: "0.9.0.0"
+      ORMOLU_SHA256: "367eb4969986504cf171f71f91e24ea5d7d9d97c41701e8e6eef9b642fd0d201"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      # fix failures locally with:
+      # not haskell-actions/run-ormolu: v21 downloads from the old
+      # mrkkrp/ormolu repo, which is gone, and reports the 404 as
+      # "unformatted files". gh downloads through the authenticated api, so
+      # it also isn't hit by anonymous-download throttling on github.com
+      - name: Install ormolu
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release download "$ORMOLU_VERSION" --repo tweag/ormolu --pattern ormolu-x86_64-linux.zip --dir "$RUNNER_TEMP"
+          echo "$ORMOLU_SHA256  $RUNNER_TEMP/ormolu-x86_64-linux.zip" | sha256sum --check --strict
+          unzip -q -d "$RUNNER_TEMP/ormolu" "$RUNNER_TEMP/ormolu-x86_64-linux.zip"
+          echo "$RUNNER_TEMP/ormolu" >> "$GITHUB_PATH"
+
+      # prints a diff for every unformatted file. fix them locally with:
       #   ormolu --mode inplace $(git ls-files '*.hs')
-      - uses: haskell-actions/run-ormolu@f15613427428a49a241fa0331881dcf4cc118121 # v21
-        with:
-          # keep in sync with the ormolu in ~/.local/bin, which Zed formats with
-          version: "0.9.0.0"
+      - name: Check formatting
+        run: git ls-files -z '*.hs' | xargs -0 ormolu --mode check --check-idempotence
 
   build:
     name: build and test
