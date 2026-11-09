@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
   upload:
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-set
     # holds the HACKAGE_TOKEN secret, so other workflows can't read it
     environment: hackage
     container:

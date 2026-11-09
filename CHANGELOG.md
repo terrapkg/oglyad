@@ -10,3 +10,7 @@ first release.
 - `--fail-on` and distinct exit codes for automation
 - ignore files and `oglyad_ignore` labels in anda.hcl
 - caching of spec evaluations, repodata, commit times and upstream answers
+
+## 0.1.1.0
+
+prepare for release on Hackage
