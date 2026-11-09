@@ -93,6 +93,9 @@ data Stmt
     ExprStmt Expr [Token]
   | -- | a statement we don't understand, kept so we can see what it touches
     Opaque [Token]
+  | -- | `rpm.f = ...`, which rewrites the whole spec and can change Version
+    -- in ways we can't follow
+    RewritesSpec
   deriving stock (Show)
 
 -- * parsing
@@ -159,6 +162,7 @@ simple = \case
       key `elem` ["ver", "version"],
       Just [a] <- argsOnly r ->
         SetVersion False a
+  TIdent "rpm" : TSym '.' : TIdent "f" : TSym '=' : t : _ | t /= TSym '=' -> RewritesSpec
   TIdent "rpm" : _ -> Ignored
   TIdent "print" : _ -> Ignored
   TIdent v : TSym '.' : TIdent m : TSym '(' : r
@@ -380,6 +384,7 @@ exec ctx env (s : ss) = step s >>= \env' -> exec ctx env' ss
       Opaque toks
         | touches toks -> Left GiveUp
         | otherwise -> Right env
+      RewritesSpec -> Left GiveUp
     bind v val = env {envVars = Map.insert v val (envVars env)}
     touches toks = any known [v | TIdent v <- toks]
     known v = maybe False isJust (Map.lookup v (envVars env))

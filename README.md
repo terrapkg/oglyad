@@ -156,12 +156,14 @@ tested with a fake `Snapshot` in `test/Spec.hs`.
 
 everything lives in `~/.cache/oglyad`.
 
-| file              | reused while                                                                                      |
-| ----------------- | ------------------------------------------------------------------------------------------------- |
-| `specs.fcNN.json` | the package dir's files, the dist tag, and rpm's whole macro state (`rpm --showrc`) are unchanged |
-| `commits.json`    | HEAD hasn't moved                                                                                 |
-| `repodata-*.json` | the repo's primary.xml checksum is unchanged                                                      |
-| `upstream.json`   | younger than `--cache-hours` (default 6), successes only. entries unused for 30 days are dropped  |
+| file                | reused while                                                                                                                         |
+| ------------------- | ------------------------------------------------------------------------------------------------------------------------------------ |
+| `specs.fcNN.json`   | the package dir's files, the dist tag, and rpm's whole macro state (`rpm --showrc`) are unchanged                                    |
+| `commits.fcNN.json` | the release's commit hasn't moved                                                                                                    |
+| `repodata-*.json`   | the repo's primary.xml checksum is unchanged                                                                                         |
+| `upstream.json`     | younger than `--cache-hours` (default 6), or fetched earlier in the same run. successes only. entries unused for 30 days are dropped |
+| `anda.fcNN.json`    | like `upstream.json`, keyed by the package dir's files instead of the upstream                                                       |
+| `trees/<commit>/`   | extracted release branches, one per commit. ones unused for a week are deleted                                                       |
 
 a run with warm caches takes about 0.4s. a cold run takes about 5s, almost
 all of it in rpmspec. `--fedora` adds about 8s and peaks around 200MB of

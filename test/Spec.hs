@@ -171,6 +171,8 @@ main = hspec $ do
     it "treats rpm.changed() as true and follows truncate" $ do
       let script = "rpm.global(\"commit\", gh_commit(\"a/b\"));\nif rpm.changed() {\n    rpm.release();\n    let v = gh(\"a/b\");\n    v.truncate(6);\n    v.crop(1);\n    rpm.global(\"ver\", v);\n}"
       sim "v1.0.1-iot-arl-twl-asl-v6.12" script `shouldBe` Sets "1.0.1"
+    it "gives up on scripts that rewrite the spec through rpm.f" $
+      sim "v1.2.3" "let v = gh(\"a/b\");\nrpm.f = sub(`(?m)^Version:.*$`, \"Version: \" + v, rpm.f);" `shouldBe` CantTell
     it "knows a script that never sets Version won't update" $
       sim "vUDK2018" "let v = gh(\"a/b\");\nrpm.global(\"release_tag\", v);\nv.crop(3);\nrpm.global(\"shortcommit\", v);" `shouldBe` NoUpdate
     it "stops at terminate()" $
