@@ -2,12 +2,25 @@ cabal-version:   3.0
 name:            oglyad
 version:         0.1.0.0
 synopsis:        repository metadata and health checker for Terra
+description:
+  oglyad checks a terrapkg/packages checkout against Terra's published
+  repodata and upstream releases. it reports packages that never got built,
+  stale builds, upstream version drift, broken update.rhai scripts, and
+  overlap with Fedora.
+
+category:        Distribution
+homepage:        https://github.com/halfcyan/oglyad
+bug-reports:     https://github.com/halfcyan/oglyad/issues
 license:         GPL-3.0-or-later
 license-file:    LICENSE
 author:          Cypress Reed
 maintainer:      cypress@fyralabs.com
 build-type:      Simple
 extra-doc-files: README.md
+
+source-repository head
+  type:     git
+  location: https://github.com/halfcyan/oglyad.git
 
 common shared
   default-language:   GHC2021

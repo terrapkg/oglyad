@@ -42,7 +42,7 @@ upstream lookups use `GITHUB_TOKEN`, or `gh auth token` when that's unset.
 checks are `Snapshot -> Package -> [Finding]` and never do IO, so each one is
 tested with a fake `Snapshot` in `test/Spec.hs`.
 
-- **specs** are evaluated with `rpmspec`, never hand-parsed
+- **specs** are evaluated with `rpmspec`
 - **update.rhai** is lexed and pattern-matched, not run. it follows `let`
   bindings into `rpm.version(...)` / `rpm.global("ver", ...)` and recognizes
   the andax helpers (`gh`, `pypi`, `crates`, `gitlab`, ...)
@@ -53,7 +53,7 @@ tested with a fake `Snapshot` in `test/Spec.hs`.
 
 ## caching
 
-everything lives in `~/.cache/oglyad`. deleting it is always safe.
+everything lives in `~/.cache/oglyad`.
 
 | file | reused while |
 |---|---|

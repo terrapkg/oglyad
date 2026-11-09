@@ -1,0 +1,75 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# a newer push to the same branch or PR cancels the run it replaces
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: build and test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: haskell-actions/setup@0f8e8c99d88aeb3fbfd523f1ef2c6f762d10d64d # v2.12.1
+        id: setup
+        with:
+          # keep in sync with what ghcup has set locally
+          ghc-version: "9.10.3"
+          cabal-version: "3.16.1.0"
+          cabal-update: true
+
+      # the lzma and zlib bindings link against the system libraries
+      - name: Install system libraries
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends liblzma-dev zlib1g-dev
+
+      # warnings fail CI but stay warnings locally. cabal.project.local is
+      # gitignored, so this never leaks into anyone's checkout
+      - name: Configure
+        run: |
+          printf 'package oglyad\n  ghc-options: -Werror\n' > cabal.project.local
+          cabal configure --enable-tests
+          cabal build all --dry-run
+
+      # dist-newstyle/cache/plan.json pins every dependency version, so it
+      # makes an exact cache key for the cabal store
+      - name: Restore cabal store
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        id: cache
+        with:
+          path: ${{ steps.setup.outputs.cabal-store }}
+          key: ${{ runner.os }}-ghc-${{ steps.setup.outputs.ghc-version }}-${{ hashFiles('dist-newstyle/cache/plan.json') }}
+          restore-keys: ${{ runner.os }}-ghc-${{ steps.setup.outputs.ghc-version }}-
+
+      - name: Build dependencies
+        run: cabal build all --only-dependencies
+
+      # saved right after the dependencies build, so a failure in oglyad itself
+      # doesn't throw away the expensive part
+      - name: Save cabal store
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ steps.setup.outputs.cabal-store }}
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Build
+        run: cabal build all
+
+      - name: Test
+        run: cabal test all --test-show-details=direct
+
+      # upper bounds matter for libraries on Hackage. oglyad is an app with a
+      # pinned index-state, so they'd just be busywork
+      - name: Check the package
+        run: cabal check --ignore=missing-upper-bounds
