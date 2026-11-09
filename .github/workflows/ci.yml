@@ -12,12 +12,12 @@ permissions:
 # a newer push to the same branch or PR cancels the run it replaces
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   format:
     name: formatting
-    runs-on: ubuntu-latest
+    runs-on: arc-runner-set
     env:
       # keep in sync with the ormolu in ~/.local/bin, which Zed formats with.
       # the hash is the digest GitHub publishes for the release asset
@@ -44,7 +44,7 @@ jobs:
         run: git ls-files -z '*.hs' | xargs -0 ormolu --mode check --check-idempotence
 
   build:
-    name: build and test
+    name: build and test (Fedora libraries)
     runs-on: ubuntu-latest
     container:
       image: ghcr.io/terrapkg/builder:f45
@@ -71,4 +71,53 @@ jobs:
         run: cabal test all --test-show-details=direct
 
       - name: Check the package
-        run: cabal check --ignore=missing-upper-bounds
+        run: cabal check
+
+  hackage:
+    name: build and test (Hackage, from sdist)
+    runs-on: ubuntu-latest
+    container:
+      image: ghcr.io/terrapkg/builder:f45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install ghc and cabal
+        run: dnf5 -y -q install ghc cabal-install zlib-devel
+
+      - name: Unpack the sdist
+        run: |
+          cabal update
+          cabal sdist -o "$RUNNER_TEMP"
+          tar -xzf "$RUNNER_TEMP"/oglyad-*.tar.gz -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP"/oglyad-*/
+          echo "SDIST_DIR=$PWD" >> "$GITHUB_ENV"
+          printf 'packages: .\n' > cabal.project
+          printf 'package oglyad\n  ghc-options: -Werror\n' > cabal.project.local
+          cabal build all --enable-tests --dry-run
+
+      - name: Restore cabal store
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/state/cabal/store
+          key: hackage-${{ hashFiles(format('{0}/dist-newstyle/cache/plan.json', env.SDIST_DIR)) }}
+          restore-keys: hackage-
+
+      - name: Build dependencies
+        working-directory: ${{ env.SDIST_DIR }}
+        run: cabal build all --enable-tests --only-dependencies
+
+      - name: Save cabal store
+        if: steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/state/cabal/store
+          key: ${{ steps.cache.outputs.cache-primary-key }}
+
+      - name: Build and test
+        working-directory: ${{ env.SDIST_DIR }}
+        run: |
+          cabal build all --enable-tests
+          cabal test all --test-show-details=direct

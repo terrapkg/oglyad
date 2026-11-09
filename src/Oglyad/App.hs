@@ -74,7 +74,7 @@ oglyadVersion = T.pack (showVersion version)
 
 -- | identifies us to upstream APIs (crates.io's policy asks for this)
 userAgent :: ByteString
-userAgent = TE.encodeUtf8 ("oglyad/" <> oglyadVersion <> " (+https://github.com/halfcyan/oglyad)")
+userAgent = TE.encodeUtf8 ("oglyad/" <> oglyadVersion <> " (+https://github.com/terrapkg/oglyad)")
 
 -- | no single response may be larger than this. Fedora's compressed
 -- primary.xml is the biggest thing we fetch, at around 30MB
