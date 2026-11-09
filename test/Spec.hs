@@ -1,6 +1,9 @@
 module Main (main) where
 
 import Control.Exception (bracket)
+import Control.Monad (forM_)
+import Data.Aeson (Value (..), decode)
+import Data.Aeson.KeyMap qualified as KM
 import Data.ByteString.Lazy.Char8 qualified as LBS8
 import Data.Map.Strict qualified as Map
 import Data.Set qualified as Set
@@ -8,23 +11,25 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime (..), addUTCTime, fromGregorian, nominalDay)
 import Oglyad.App (runApp)
-import Oglyad.Check (parseCheckName)
+import Oglyad.Check (checkNames, parseCheckName)
+import Oglyad.Check.BuildLag qualified as BuildLag
 import Oglyad.Check.Drift qualified as Drift
 import Oglyad.Check.DuplicateName qualified as DuplicateName
 import Oglyad.Check.FedoraOverlap qualified as FedoraOverlap
 import Oglyad.Check.Stale qualified as Stale
-import Oglyad.Process (run)
-import Oglyad.Report (renderText)
-import Oglyad.Source.Monorepo (hclString, lastCommits, macroFingerprint)
-import Oglyad.Source.Repodata (RpmEntry (..), fetchRepo, latestBySource, parsePrimary, srpmName)
+import Oglyad.Ignore
+import Oglyad.Process (childEnv, run)
+import Oglyad.Report (Report (..), renderJson, renderMarkdown, renderText)
+import Oglyad.Source.Monorepo (PkgDir (..), findPackageDirs, hclString, lastCommits, macroFingerprint, specFingerprint)
+import Oglyad.Source.Repodata (RpmEntry (..), decompressAndParse, fetchRepo, latestBySource, parsePrimary, srpmName)
 import Oglyad.Source.Rhai (parseUpdateRhai)
 import Oglyad.Types
 import Oglyad.Version
-import System.Directory (createDirectoryIfMissing)
+import System.Directory (createDirectoryIfMissing, createDirectoryLink, createFileLink)
 import System.Environment (lookupEnv, setEnv, unsetEnv)
 import System.FilePath ((</>))
 import System.IO.Temp (withSystemTempDirectory)
-import System.Process.Typed (proc, runProcess_, setEnv)
+import System.Process.Typed (byteStringInput, proc, readProcess, runProcess_, setEnv, setStdin)
 import Test.Hspec
 import Test.QuickCheck
 
@@ -111,6 +116,19 @@ main = hspec $ do
     it "groups binaries by source package" $
       Map.keys (latestBySource entries) `shouldBe` ["zed"]
     it "rejects garbage" $ parsePrimary "<metadata><package>" `shouldSatisfy` isLeft
+    it "decompresses zstd through the zstd command" $ do
+      -- the same fixture, compressed by the real zstd tool
+      (_, compressed, _) <- readProcess (setStdin (byteStringInput primaryFixture) (proc "zstd" ["-c", "-q"]))
+      r <- decompressAndParse "repodata/abc-primary.xml.zst" compressed
+      fmap (map rpmName) r `shouldBe` Right ["zed", "zed-cli"]
+    forM_ [("gzip", ".gz"), ("xz", ".xz")] $ \(tool, ext) ->
+      it ("decompresses " <> tool <> " through the " <> tool <> " command") $ do
+        (_, compressed, _) <- readProcess (setStdin (byteStringInput primaryFixture) (proc tool ["-c", "-q"]))
+        r <- decompressAndParse ("repodata/abc-primary.xml" <> T.pack ext) compressed
+        fmap (map rpmName) r `shouldBe` Right ["zed", "zed-cli"]
+    it "reports corrupt zstd instead of crashing" $ do
+      r <- decompressAndParse "repodata/abc-primary.xml.zst" "definitely not zstd"
+      r `shouldSatisfy` isLeft
 
   describe "hclString" $ do
     let hcl = "project pkg {\n  rpm {\n    spec = \"zed.spec\"\n  }\n  labels {\n    subrepo = \"extras\"\n  }\n}\n"
@@ -174,9 +192,93 @@ main = hspec $ do
   describe "report" $ do
     let f path = Finding "build-lag" "zed" (Just path) Warn "x"
     it "shows the directory when a name is ambiguous" $
-      renderText Info [f "anda/a", f "anda/b"] `shouldSatisfy` T.isInfixOf "zed (anda/a): x"
+      renderText Info (report [f "anda/a", f "anda/b"]) `shouldSatisfy` T.isInfixOf "zed (anda/a): x"
     it "keeps it short otherwise" $
-      renderText Info [f "anda/a"] `shouldSatisfy` T.isInfixOf "zed: x"
+      renderText Info (report [f "anda/a"]) `shouldSatisfy` T.isInfixOf "zed: x"
+    it "counts ignored findings in the summary" $
+      renderText Info ((report [f "anda/a"]) {rIgnored = [f "anda/b"]}) `shouldSatisfy` T.isInfixOf "(1 ignored)"
+    it "wraps json in a versioned envelope" $ do
+      let o = case decode (renderJson (report [f "anda/a"])) of
+            Just (Object x) -> x
+            _ -> KM.empty
+      KM.lookup "schema" o `shouldBe` Just (Number 1)
+      KM.lookup "summary" o `shouldSatisfy` maybe False (\case Object s -> KM.lookup "warn" s == Just (Number 1); _ -> False)
+      KM.lookup "findings" o `shouldSatisfy` maybe False (\case Array a -> length a == 1; _ -> False)
+    it "escapes pipes in markdown tables" $
+      renderMarkdown Info (report [(f "anda/a") {fMessage = "a|b"}]) `shouldSatisfy` T.isInfixOf "a\\|b"
+    it "folds info findings away in markdown" $
+      renderMarkdown Info (report [(f "anda/a") {fSeverity = Info}]) `shouldSatisfy` T.isInfixOf "<details><summary>Info (1)"
+
+  describe "ignores" $ do
+    let f check path name = Finding check name (Just path) Warn "x"
+        dup = f "duplicate-name" "anda/langs/zig/master-bootstrap" "zig-master"
+        lag = f "build-lag" "anda/devs/zed/stable" "zed"
+        file rules = IgnoreFile rules
+        rule check target = IgnoreRule check target "because"
+        apply rules labels = applyIgnores checkNames checkNames (file rules) (Map.fromList labels)
+    it "parses a valid file" $
+      parseIgnoreFile checkNames "{\"ignore\": [{\"check\": \"stale\", \"package\": \"zed\", \"reason\": \"fine\"}]}"
+        `shouldBe` Right (file [IgnoreRule "stale" (ByName "zed") "fine"])
+    forM_
+      [ ("an empty reason", "{\"ignore\": [{\"check\": \"stale\", \"package\": \"zed\", \"reason\": \" \"}]}"),
+        ("an unknown check", "{\"ignore\": [{\"check\": \"stael\", \"package\": \"zed\", \"reason\": \"x\"}]}"),
+        ("both path and package", "{\"ignore\": [{\"check\": \"stale\", \"package\": \"zed\", \"path\": \"anda/x\", \"reason\": \"x\"}]}")
+      ]
+      $ \(what, raw) -> it ("rejects " <> what) $ parseIgnoreFile checkNames raw `shouldSatisfy` either (const True) (const False)
+    it "ignores by path" $ do
+      let Applied {..} = apply [rule "duplicate-name" (ByPath "anda/langs/zig/master-bootstrap")] [] [dup, lag]
+      (apKept, apIgnored, apProblems) `shouldBe` ([lag], [dup], [])
+    it "ignores by package name" $ do
+      let Applied {..} = apply [rule "build-lag" (ByName "zed")] [] [dup, lag]
+      (apKept, apIgnored) `shouldBe` ([dup], [lag])
+    it "ignores by anda.hcl label" $ do
+      let Applied {..} = apply [] [("anda/langs/zig/master-bootstrap", ["duplicate-name"])] [dup, lag]
+      (apKept, apIgnored) `shouldBe` ([lag], [dup])
+    it "only matches the named check" $ do
+      let Applied {..} = apply [rule "stale" (ByName "zed")] [] [lag]
+      apKept `shouldBe` [lag]
+    it "reports entries that match nothing" $ do
+      let Applied {..} = apply [rule "stale" (ByName "gone")] [] [lag]
+      map fCheck apProblems `shouldBe` ["unused-ignore"]
+    it "doesn't call entries unused when their check didn't run" $ do
+      let Applied {..} = applyIgnores checkNames ["build-lag"] (file [rule "stale" (ByName "gone")]) Map.empty [lag]
+      apProblems `shouldBe` []
+    it "flags unknown check names in labels" $ do
+      let Applied {..} = apply [] [("anda/x", ["stael"])] []
+      map fSeverity apProblems `shouldBe` [Warn]
+
+  describe "build-lag check" $ do
+    it "says never published when the repo was fetched" $
+      severities (BuildLag.check snapshot pkg) `shouldBe` [Error]
+    it "stays quiet when the repo fetch failed" $
+      BuildLag.check snapshot pkg {pkgRepoChecked = False} `shouldBe` []
+
+  describe "child processes" $ do
+    it "never get secrets from our environment" $ do
+      let env = childEnv [("PATH", "/usr/bin"), ("HOME", "/home/x"), ("GITHUB_TOKEN", "secret"), ("GH_TOKEN", "secret"), ("AWS_SECRET_ACCESS_KEY", "s"), ("LC_ALL", "C")]
+      map fst env `shouldMatchList` ["GIT_TERMINAL_PROMPT", "PATH", "HOME", "LC_ALL"]
+    it "can't read GITHUB_TOKEN even when spec-like code asks for it" $
+      withEnv "GITHUB_TOKEN" "oglyad-test-secret" $ do
+        r <- run "sh" ["-c", "env"]
+        r `shouldSatisfy` either (const False) (not . T.isInfixOf "oglyad-test-secret")
+
+  describe "filesystem edge cases" $ do
+    it "fingerprints a package with a dangling symlink instead of crashing" $
+      withSystemTempDirectory "oglyad-fp" $ \root -> do
+        createDirectoryIfMissing True (root </> "anda/a")
+        writeFile (root </> "anda/a/a.spec") "Name: a"
+        createFileLink "does-not-exist" (root </> "anda/a/broken")
+        key <- specFingerprint "m" ".fc44" root "anda/a"
+        T.length key `shouldBe` 64
+    it "doesn't follow a symlink loop" $
+      withSystemTempDirectory "oglyad-loop" $ \root -> do
+        createDirectoryIfMissing True (root </> "anda/a")
+        writeFile (root </> "anda/a/anda.hcl") "project pkg {}"
+        createDirectoryLink ".." (root </> "anda/a/loop")
+        dirs <- findPackageDirs root
+        map (fmap pdPath) dirs `shouldBe` [Right "anda/a"]
+        _ <- specFingerprint "m" ".fc44" root "anda/a"
+        pure ()
 
   describe "parseCheckName" $ do
     it "accepts known checks" $ parseCheckName "build-lag" `shouldBe` Right "build-lag"
@@ -269,7 +371,8 @@ pkg =
       pkgLastCommit = Nothing,
       pkgUpstream = Just (GitHub "zed-industries/zed"),
       pkgUpstreamVer = Nothing,
-      pkgUpstreamErr = Nothing
+      pkgUpstreamErr = Nothing,
+      pkgRepoChecked = True
     }
 
 snapshot :: Snapshot
@@ -283,13 +386,28 @@ snapshot =
           { cfgMonorepo = ".",
             cfgTerraRepo = "",
             cfgFedoraRepos = [],
+            cfgRelease = 44,
             cfgDist = ".fc44",
             cfgStaleAfter = 180 * nominalDay,
             cfgUpstream = False,
             cfgCacheFor = 0,
             cfgConcurrency = 1,
             cfgGitHubToken = Nothing
-          }
+          },
+      snapHead = Nothing,
+      snapIgnoreLabels = Map.empty
+    }
+
+report :: [Finding] -> Report
+report fs =
+  Report
+    { rVersion = "0",
+      rGenerated = now,
+      rMonorepoHead = Just "abc",
+      rTerraRepo = "https://repos.fyralabs.com/terra44",
+      rUpstream = False,
+      rFindings = fs,
+      rIgnored = []
     }
 
 primaryFixture :: LBS8.ByteString

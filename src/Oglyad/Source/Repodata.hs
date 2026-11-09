@@ -2,6 +2,7 @@
 module Oglyad.Source.Repodata
   ( RpmEntry (..),
     fetchRepo,
+    decompressAndParse,
     parseRepomd,
     parsePrimary,
     srpmName,
@@ -9,12 +10,10 @@ module Oglyad.Source.Repodata
   )
 where
 
-import Codec.Compression.GZip qualified as GZip
-import Codec.Compression.Lzma qualified as Lzma
-import Codec.Compression.Zstd.Lazy qualified as Zstd
-import Conduit (foldlC, runConduit, sourceLazy, (.|))
-import Control.Exception (SomeException, evaluate, try)
-import Control.Monad ((>=>))
+import Conduit (foldlC, runConduit, sourceHandle, sourceLazy, (.|))
+import Control.DeepSeq (deepseq)
+import Control.Exception (SomeException, try)
+import Control.Monad ((<$!>), (>=>))
 import Control.Monad.Reader (liftIO)
 import Data.Bifunctor (first)
 import Data.ByteString.Lazy qualified as LBS
@@ -28,22 +27,29 @@ import Data.Text.Read qualified as TR
 import Data.Time (UTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import Data.XML.Types (Content (..), Event (..))
-import Oglyad.App (App, httpGetE, note)
+import Oglyad.App (App, HttpError (..), httpGetE, note)
+import Oglyad.Process (childEnv)
 import Oglyad.Source.Cache (loadJson, saveJson)
 import Oglyad.Types (RepoBuild (..))
 import Oglyad.Version (EVR (..))
+import System.Environment (getEnvironment)
+import System.Exit (ExitCode (..))
+import System.IO (Handle)
+import System.Process.Typed (byteStringInput, createPipe, getStdout, nullStream, proc, setEnv, setStderr, setStdin, setStdout, waitExitCode, withProcessTerm)
 import Text.XML (Name (..), def, parseLBS)
 import Text.XML.Cursor (attribute, attributeIs, element, fromDocument, ($//), (&/))
 import Text.XML.Stream.Parse (parseBytes)
 
 -- | one binary (or source) rpm from primary.xml
+-- | strict fields, filled with copied text (see 'finish' in 'parsePrimary'),
+-- so a parsed entry never keeps the decompressed file alive
 data RpmEntry = RpmEntry
-  { rpmName :: Text,
-    rpmArch :: Text,
-    rpmEVR :: EVR,
+  { rpmName :: !Text,
+    rpmArch :: !Text,
+    rpmEVR :: !EVR,
     -- | e.g. zed-0.190.0-1.fc44.src.rpm, absent on src rpms
-    rpmSourceRpm :: Maybe Text,
-    rpmBuildTime :: UTCTime
+    rpmSourceRpm :: !(Maybe Text),
+    rpmBuildTime :: !UTCTime
   }
   deriving stock (Eq, Show)
 
@@ -54,7 +60,7 @@ fetchRepo :: Text -> App (Either String (Map Text RepoBuild))
 fetchRepo base = do
   let file = "repodata-" <> T.unpack (T.map (\c -> if isAlphaNum c then c else '_') base) <> ".json"
   repomd <- httpGetE (base <> "/repodata/repomd.xml")
-  case first T.unpack repomd >>= parseRepomd of
+  case first httpErr repomd >>= parseRepomd of
     Left err -> pure (Left err)
     Right href ->
       liftIO (loadJson file) >>= \case
@@ -71,26 +77,43 @@ fetchRepo base = do
 fetchPrimaryAt :: Text -> Text -> App (Either String [RpmEntry])
 fetchPrimaryAt base href = do
   download <- httpGetE (base <> "/" <> href)
-  case (,) <$> first T.unpack download <*> decompressorFor href of
+  case first httpErr download of
     Left err -> pure (Left err)
-    Right (compressed, decompress) -> do
-      -- decompression is lazy, so a corrupt archive only explodes once
-      -- the parser pulls on it. force the whole parse here so that
-      -- explosion turns into a Left instead of crashing the program later
-      r <- liftIO (try (evaluate (forceEntries (parsePrimary (decompress compressed)))))
-      pure (either (\e -> Left (show (e :: SomeException))) id r)
-  where
-    forceEntries r = case r of
-      Right es -> length es `seq` r
-      Left _ -> r
+    Right compressed -> liftIO (decompressAndParse href compressed)
 
-decompressorFor :: Text -> Either String (LBS.ByteString -> LBS.ByteString)
-decompressorFor href
-  | ".zst" `T.isSuffixOf` href = Right Zstd.decompress
-  | ".gz" `T.isSuffixOf` href = Right GZip.decompress
-  | ".xz" `T.isSuffixOf` href = Right Lzma.decompress
-  | ".xml" `T.isSuffixOf` href = Right id
-  | otherwise = Left ("don't know how to decompress " <> T.unpack href)
+httpErr :: HttpError -> String
+httpErr = \case
+  RateLimited why -> T.unpack why
+  HttpFailed why -> T.unpack why
+
+-- | decompress a primary.xml by its file extension and parse it, streaming
+-- from the decompressor's pipe so even Fedora's ~250MB file never sits in
+-- memory.
+--
+-- decompression goes through the zstd, gzip and xz commands, which every
+-- Fedora install has. Fedora doesn't package a Haskell zstd binding, and
+-- oglyad should build from Fedora's own libraries
+decompressAndParse :: Text -> LBS.ByteString -> IO (Either String [RpmEntry])
+decompressAndParse href compressed
+  | ".zst" `T.isSuffixOf` href = viaCommand "zstd" ["--decompress", "--stdout", "--quiet"]
+  | ".gz" `T.isSuffixOf` href = viaCommand "gzip" ["--decompress", "--stdout", "--quiet"]
+  | ".xz" `T.isSuffixOf` href = viaCommand "xz" ["--decompress", "--stdout", "--quiet"]
+  | ".xml" `T.isSuffixOf` href = pure (parsePrimary compressed)
+  | otherwise = pure (Left ("don't know how to decompress " <> T.unpack href))
+  where
+    -- feed the download to the command's stdin and parse its stdout as it
+    -- arrives. a corrupt archive makes the command fail, which shows up as
+    -- a parse error or a non-zero exit, never a crash
+    viaCommand cmd args = do
+      env <- childEnv <$> getEnvironment
+      let cfg = setEnv env (setStdin (byteStringInput compressed) (setStdout createPipe (setStderr nullStream (proc cmd args))))
+      r <- try $ withProcessTerm cfg $ \p -> do
+        parsed <- parsePrimaryHandle (getStdout p)
+        code <- waitExitCode p
+        pure $ case (code, parsed) of
+          (ExitFailure n, _) -> Left (cmd <> " exited with " <> show n <> " decompressing " <> T.unpack href)
+          (ExitSuccess, _) -> parsed
+      pure (either (\e -> Left (cmd <> ": " <> show (e :: SomeException))) id r)
 
 repoNs, commonNs, rpmNs :: Text -> Name
 repoNs n = Name n (Just "http://linux.duke.edu/metadata/repo") Nothing
@@ -139,26 +162,44 @@ data St = St
     stDepth :: !Int
   }
 
--- | parse decompressed primary.xml.
+-- | parse decompressed primary.xml from memory. the real runs stream from a
+-- pipe with 'parsePrimaryHandle'. this one is for small inputs and tests.
 --
 -- unlike repomd.xml this file is big (Terra's is ~20MB, Fedora's is ~200MB)
 -- so we never build a DOM. instead the XML is turned into a stream of events
 -- (element opened, text, element closed, ...) and folded over with a small
 -- state machine. memory use stays proportional to the results, not the file
 parsePrimary :: LBS.ByteString -> Either String [RpmEntry]
-parsePrimary bs = do
-  final <-
-    first (\e -> show (e :: SomeException)) $
-      runConduit (sourceLazy bs .| parseBytes def .| foldlC step' (St emptyAcc CapNone [] 0))
-  if stDepth final /= 0
-    then Left "primary.xml ends in the middle of an element, truncated download?"
-    else Right (reverse (stOut final))
-  where
-    step' st ev = case ev of
-      EventBeginElement _ _ -> step st {stDepth = stDepth st + 1} ev
-      EventEndElement _ -> step st {stDepth = stDepth st - 1} ev
-      _ -> step st ev
+parsePrimary bs =
+  first (\e -> show (e :: SomeException)) (runConduit (sourceLazy bs .| parseBytes def .| foldlC stepPrimary st0))
+    >>= finishPrimary
 
+-- | parse primary.xml straight from a handle.
+--
+-- reading the handle chunk by chunk matters: handing the parser a lazy
+-- ByteString instead lets the thunk evaluating it hold on to the start of the
+-- stream, which keeps the whole decompressed file (250MB for Fedora) alive
+-- until parsing ends
+parsePrimaryHandle :: Handle -> IO (Either String [RpmEntry])
+parsePrimaryHandle h = do
+  r <- try (runConduit (sourceHandle h .| parseBytes def .| foldlC stepPrimary st0))
+  pure (either (\e -> Left (show (e :: SomeException))) finishPrimary r)
+
+st0 :: St
+st0 = St emptyAcc CapNone [] 0
+
+finishPrimary :: St -> Either String [RpmEntry]
+finishPrimary final
+  | stDepth final /= 0 = Left "primary.xml ends in the middle of an element, truncated download?"
+  | otherwise = Right (reverse (stOut final))
+
+-- | one xml event. tracks element depth so truncation can be detected
+stepPrimary :: St -> Event -> St
+stepPrimary cur ev = case ev of
+  EventBeginElement _ _ -> step cur {stDepth = stDepth cur + 1} ev
+  EventEndElement _ -> step cur {stDepth = stDepth cur - 1} ev
+  _ -> step cur ev
+  where
     step st = \case
       EventBeginElement name attrs
         | name == commonNs "package" -> st {stAcc = emptyAcc, stCap = CapNone}
@@ -185,10 +226,19 @@ parsePrimary bs = do
         | otherwise -> st {stCap = CapNone}
       _ -> st
 
+    -- the text we collected is sliced out of the parser's buffers, and a
+    -- slice keeps its whole buffer alive. copying is what stops 75k Fedora
+    -- entries from pinning the entire decompressed file in memory
+    --
+    -- the build time needs the same care. UTCTime's fields are lazy, so
+    -- without a deep force it stays a thunk pointing at the xml attribute it
+    -- came from, which pins that attribute's whole decoder chunk
     finish PkgAcc {..} = do
-      evr <- accEVR
+      EVR e v r <- accEVR
       t <- accTime
-      if T.null accName then Nothing else Just (RpmEntry accName accArch evr accSrpm t)
+      if T.null accName
+        then Nothing
+        else t `deepseq` (Just $! RpmEntry (T.copy accName) (T.copy accArch) (EVR e (T.copy v) (T.copy r)) (T.copy <$!> accSrpm) t)
 
     lookupAttr :: Name -> [(Name, [Content])] -> Maybe Text
     lookupAttr k attrs = do

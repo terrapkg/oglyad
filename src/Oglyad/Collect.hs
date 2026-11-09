@@ -5,17 +5,17 @@ module Oglyad.Collect
 where
 
 import Control.Concurrent.Async (concurrently)
-import Control.Monad (when)
+import Control.Monad (forM, when)
 import Control.Monad.Reader (ask, asks, liftIO, runReaderT)
 import Data.Either (partitionEithers)
-import Data.List (nub)
+import Data.List (nub, partition)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (UTCTime, getCurrentTime)
-import Oglyad.App (App, Env (..), forConcurrentlyN, note)
+import Data.Time (UTCTime, diffUTCTime, getCurrentTime, nominalDay)
+import Oglyad.App (App, Env (..), HttpError (..), forConcurrentlyN, note)
 import Oglyad.Source.Cache (CacheEntry (..), UpstreamCache, loadJson, lookupFresh, saveJson)
 import Oglyad.Source.Monorepo
 import Oglyad.Source.Repodata (fetchRepo)
@@ -34,7 +34,8 @@ buildSnapshot :: App (Snapshot, [Finding])
 buildSnapshot = do
   cfg@Config {..} <- asks envConfig
   now <- liftIO getCurrentTime
-  dirs <- liftIO (findPackageDirs cfgMonorepo)
+  (dirErrs, dirs) <- partitionEithers <$> liftIO (findPackageDirs cfgMonorepo)
+  hd <- liftIO (headCommit cfgMonorepo)
 
   -- the main repo, every subrepo some package asked for, and Fedora
   let terraRepos =
@@ -48,18 +49,30 @@ buildSnapshot = do
         (runReaderT (fetchRepos terraRepos cfgFedoraRepos) env)
 
   let (repoErrs, repos) = partitionEithers terra
-      repoFor p = Map.findWithDefault Map.empty (pkgSubrepo p) (Map.fromList repos)
-      pkgs1 = [p {pkgRepoBuild = Map.lookup (pkgName p) (repoFor p)} | p <- pkgs0]
-  pkgs <- if cfgUpstream then withUpstreams now pkgs1 else pure pkgs1
+      fetched = Map.fromList repos
+      pkgs1 =
+        [ p
+            { pkgRepoBuild = Map.lookup (pkgSubrepo p) fetched >>= Map.lookup (pkgName p),
+              pkgRepoChecked = Map.member (pkgSubrepo p) fetched
+            }
+        | p <- pkgs0
+        ]
+  (upErrs, pkgs) <- if cfgUpstream then withUpstreams now pkgs1 else pure ([], pkgs1)
 
   let snap =
         Snapshot
           { snapPackages = Map.fromList [(pkgPath p, p) | p <- pkgs],
             snapFedora = foldMap Map.keysSet fedora,
             snapNow = now,
-            snapConfig = cfg
+            snapConfig = cfg,
+            snapHead = hd,
+            snapIgnoreLabels = Map.fromList [(pdPath d, pdIgnores d) | d <- dirs, not (null (pdIgnores d))]
           }
-  pure (snap, specErrs <> repoErrs)
+      unreadable =
+        [ (collectErr (T.pack path) ("can't read package dir: " <> err)) {fPath = Just (T.pack path)}
+        | (path, err) <- dirErrs
+        ]
+  pure (snap, unreadable <> specErrs <> repoErrs <> upErrs)
 
 -- | every repo at once. Terra failures become findings, Fedora ones just mean
 -- no overlap data
@@ -79,11 +92,14 @@ readPackages :: [PkgDir] -> App ([Finding], [Package])
 readPackages dirs = do
   Config {..} <- asks envConfig
   root <- liftIO (makeAbsolute cfgMonorepo)
+  -- one cache file per dist, so cron jobs checking different releases don't
+  -- keep evicting each other's entries
+  let cacheFile = "specs" <> T.unpack cfgDist <> ".json"
   (commits, (macros, cache)) <-
     liftIO $
       concurrently
         (commitTimes cfgMonorepo (map pdPath dirs))
-        ((,) <$> macroFingerprint <*> (fromMaybe Map.empty <$> loadJson "specs.json"))
+        ((,) <$> macroFingerprint <*> (fromMaybe Map.empty <$> loadJson cacheFile))
   keyed <- forConcurrentlyN cfgConcurrency dirs $ \d -> liftIO $ do
     key <- specFingerprint macros cfgDist root (pdPath d)
     pure (key, d)
@@ -96,11 +112,11 @@ readPackages dirs = do
     case (Map.lookup key cache, pdSpec d) of
       (Just cached, _) -> pure (Evaluated key d cached)
       (Nothing, Just spec)
-        | hasRpmspec -> Evaluated key d <$> querySpec cfgDist (root </> spec)
+        | hasRpmspec -> Evaluated key d <$> querySpec cfgRelease cfgDist (root </> spec)
         | otherwise -> pure Skipped
       (Nothing, Nothing) -> pure (NoSpec d)
   -- keep only entries for packages that still exist, so the file can't grow forever
-  liftIO (saveJson "specs.json" (Map.fromList [(k, i) | Evaluated k _ i <- results]))
+  liftIO (saveJson cacheFile (Map.fromList [(k, i) | Evaluated k _ i <- results]))
   let skipped = length [() | Skipped <- results]
       missing =
         [ collectErr "rpmspec" ("rpmspec not found, install rpm-build. skipped " <> T.pack (show skipped) <> " specs with no cached result")
@@ -146,14 +162,19 @@ toPackage commits PkgDir {..} = \case
           pkgLastCommit = Map.lookup pdPath commits,
           pkgUpstream = parseUpdateRhai <$> pdUpdateRhai,
           pkgUpstreamVer = Nothing,
-          pkgUpstreamErr = Nothing
+          pkgUpstreamErr = Nothing,
+          pkgRepoChecked = False
         }
   where
     firstLine t = let l = T.takeWhile (/= '\n') t in if T.null l then "(no output)" else l
     pathErr msg = (collectErr (T.pack pdPath) msg) {fPath = Just (T.pack pdPath)}
 
--- | fill in upstream versions, from the cache when it's fresh enough
-withUpstreams :: UTCTime -> [Package] -> App [Package]
+-- | fill in upstream versions, from the cache when it's fresh enough.
+--
+-- crates.io allows one request a second, so its lookups run in their own
+-- serial queue next to everything else. inside the shared job pool, a cluster
+-- of crates packages would hold every slot while waiting their turn
+withUpstreams :: UTCTime -> [Package] -> App ([Finding], [Package])
 withUpstreams now pkgs = do
   Config {..} <- asks envConfig
   when (isNothing cfgGitHubToken) $
@@ -161,13 +182,20 @@ withUpstreams now pkgs = do
   cache <- liftIO (fromMaybe Map.empty <$> loadJson "upstream.json") :: App UpstreamCache
   let wanted = [p | p <- pkgs, Just src <- [pkgUpstream p], lookable src]
       fresh p = pkgUpstream p >>= \src -> lookupFresh cfgCacheFor now src cache
+      (crates, others) = partition (isCrates . pkgUpstream) wanted
+      lookup1 p = case (fresh p, pkgUpstream p) of
+        (Just e, _) -> pure (pkgPath p, either (Left . HttpFailed) Right (ceResult e))
+        (Nothing, Just src) -> (pkgPath p,) <$> latestVersion src
+        (Nothing, Nothing) -> pure (pkgPath p, Left (HttpFailed "no source"))
   note ("querying upstreams for " <> show (length wanted) <> " packages, " <> show (length (filter (isJust . fresh) wanted)) <> " cached")
-  results <- forConcurrentlyN cfgConcurrency wanted $ \p -> case (fresh p, pkgUpstream p) of
-    (Just e, _) -> pure (pkgPath p, ceResult e)
-    (Nothing, Just src) -> (pkgPath p,) <$> latestVersion src
-    (Nothing, Nothing) -> pure (pkgPath p, Left "no source")
+  env <- ask
+  (r1, r2) <-
+    liftIO $
+      concurrently
+        (runReaderT (forConcurrentlyN cfgConcurrency others lookup1) env)
+        (runReaderT (forM crates lookup1) env)
   -- keyed by path, not name: two dirs can share a package name
-  let byPath = Map.fromList results :: Map FilePath (Either Text Text)
+  let byPath = Map.fromList (r1 <> r2)
       -- only cache successes. errors are often transient (rate limits, timeouts)
       new =
         Map.fromList
@@ -177,20 +205,37 @@ withUpstreams now pkgs = do
             Just src <- [pkgUpstream p],
             Just (Right v) <- [Map.lookup (pkgPath p) byPath]
           ]
-  liftIO (saveJson "upstream.json" (new <> cache))
+      -- forget answers nobody has asked for in a month
+      recent = Map.filter (\e -> diffUTCTime now (ceFetched e) < 30 * nominalDay) cache
+      limited = [why | Left (RateLimited why) <- Map.elems byPath]
+      rateErr = case limited of
+        [] -> []
+        why : _ ->
+          [ (collectErr "upstream" (why <> ", skipped " <> T.pack (show (length limited)) <> " lookups. set GITHUB_TOKEN, or try again later"))
+              { fSeverity = Warn
+              }
+          ]
+  liftIO (saveJson "upstream.json" (new <> recent))
   pure
-    [ case Map.lookup (pkgPath p) byPath of
-        Just (Right v) -> p {pkgUpstreamVer = Just v}
-        Just (Left e) -> p {pkgUpstreamErr = Just e}
-        Nothing -> p
-    | p <- pkgs
-    ]
+    ( rateErr,
+      [ case Map.lookup (pkgPath p) byPath of
+          Just (Right v) -> p {pkgUpstreamVer = Just v}
+          Just (Left (HttpFailed e)) -> p {pkgUpstreamErr = Just e}
+          -- rate limits are reported once above, not as a broken upstream
+          Just (Left (RateLimited _)) -> p
+          Nothing -> p
+      | p <- pkgs
+      ]
+    )
   where
     lookable = \case
       CommitTracked -> False
       Derived _ -> False
       Unknown _ -> False
       _ -> True
+    isCrates = \case
+      Just (Crates _ _) -> True
+      _ -> False
 
 collectErr :: Text -> Text -> Finding
 collectErr what msg = Finding {fCheck = "collect", fPackage = what, fPath = Nothing, fSeverity = Error, fMessage = msg}

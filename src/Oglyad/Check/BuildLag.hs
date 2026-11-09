@@ -6,6 +6,9 @@ import Oglyad.Version (compareEVR, renderEVR)
 
 check :: Check
 check _ p@Package {..} = case (pkgSpecEVR, pkgRepoBuild) of
+  -- the repo fetch failed, which is already a collect error. claiming every
+  -- package in it was never published would bury that under noise
+  _ | not pkgRepoChecked -> []
   (Just spec, Nothing) ->
     [finding' Error ("never published (spec is at " <> renderEVR spec <> ")")]
   (Just spec, Just RepoBuild {rbEVR = repo})

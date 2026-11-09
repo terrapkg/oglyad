@@ -5,16 +5,66 @@ repository metadata and health checker for [Terra](https://terra.fyralabs.com).
 
 ```sh
 git clone https://github.com/terrapkg/packages ../packages
-cabal run oglyad -- -m ../packages            # warnings and errors
-cabal run oglyad -- -m ../packages -v         # plus info findings
-cabal run oglyad -- -m ../packages -u         # plus upstream version drift
-cabal run oglyad -- -m ../packages --fedora   # plus overlap with Fedora
-cabal run oglyad -- -m ../packages --only drift --json
-cabal test
+oglyad -m ../packages            # warnings and errors
+oglyad -m ../packages -v         # plus info findings
+oglyad -m ../packages -u         # plus upstream version drift
+oglyad -m ../packages --fedora   # plus overlap with Fedora
+oglyad -m ../packages --only drift --format json
 ```
 
-it exits non-zero when there are error findings, so it can gate CI.
+from a checkout, `cabal run oglyad -- <args>` and `cabal test`. it needs
+`rpmspec` (rpm-build), `git`, and the `zstd`, `gzip` and `xz` commands.
 upstream lookups use `GITHUB_TOKEN`, or `gh auth token` when that's unset.
+
+## output and exit codes
+
+`--format` picks `text` (default), `markdown` (made for GitHub job
+summaries) or `json`. the json is a versioned envelope:
+
+```json
+{"schema": 1, "oglyad": "0.1.0.0", "generated": "...", "monorepo_head": "...",
+ "summary": {"error": 0, "warn": 0, "info": 0, "ignored": 0},
+ "findings": [{"check": "...", "package": "...", "path": "...", "severity": "...", "message": "..."}],
+ "ignored": [...]}
+```
+
+`schema` changes on any breaking change to the json.
+
+| exit | meaning |
+|---|---|
+| 0 | ran, nothing at or above `--fail-on` (default `error`, or `warn`, `info`, `never`) |
+| 1 | ran, and found something at or above `--fail-on` |
+| 2 | couldn't run: bad flags, unreadable ignore file, not a monorepo |
+
+## ignoring known findings
+
+some findings are intentional, like a bootstrap package sharing its real
+package's name. there are two ways to silence one, and ignored findings
+don't count toward the exit code.
+
+an ignore file, passed with `--ignore-file`. every entry needs a reason, and
+names one check plus a monorepo `path` or a `package` name:
+
+```json
+{
+  "ignore": [
+    {"check": "duplicate-name", "path": "anda/langs/zig/master-bootstrap",
+     "reason": "bootstrap build of zig-master"}
+  ]
+}
+```
+
+or a label in the package's own `anda.hcl`:
+
+```hcl
+labels {
+  oglyad_ignore = "duplicate-name, stale"
+}
+```
+
+file entries that no longer match anything are reported as `unused-ignore`,
+so exceptions don't outlive their reason. `--no-ignores` shows everything.
+[`ignores.json`](ignores.json) is the file the nightly report uses.
 
 ## checks
 
@@ -28,7 +78,8 @@ upstream lookups use `GITHUB_TOKEN`, or `gh auth token` when that's unset.
 | `fedora-overlap` | warn | Fedora ships the same source package (`--fedora`). subrepos are exempt |
 | `no-autoupdate` | info | no update.rhai |
 | `unparsed-rhai` | info | update.rhai does something oglyad can't follow, like custom scraping |
-| `collect` | error | rpmspec failed, or a repo couldn't be fetched |
+| `collect` | error | rpmspec failed, a repo couldn't be fetched, or an upstream rate-limited us (warn) |
+| `unused-ignore` | info / warn | an ignore entry matches nothing, or an `oglyad_ignore` label names an unknown check |
 
 ## how it works
 
@@ -58,13 +109,47 @@ everything lives in `~/.cache/oglyad`.
 
 | file | reused while |
 |---|---|
-| `specs.json` | the package dir's files, the dist tag, and the installed rpm macros are unchanged |
+| `specs.fcNN.json` | the package dir's files, the dist tag, and rpm's whole macro state (`rpm --showrc`) are unchanged |
 | `commits.json` | HEAD hasn't moved |
 | `repodata-*.json` | the repo's primary.xml checksum is unchanged |
-| `upstream.json` | younger than `--cache-hours` (default 6), successes only |
+| `upstream.json` | younger than `--cache-hours` (default 6), successes only. entries unused for 30 days are dropped |
 
 a run with warm caches takes about 0.4s. a cold run takes about 5s, almost
-all of it in rpmspec.
+all of it in rpmspec. `--fedora` adds about 8s and peaks around 200MB of
+memory the first time, since Fedora's repodata is 260MB decompressed. after
+that it's cached until Fedora publishes again.
+
+## security
+
+`rpmspec` runs the shell code in specs (`%(...)`, `%{lua:...}`), so running
+oglyad on a checkout means running that checkout's code as you. child
+processes get an allowlisted environment, so `GITHUB_TOKEN` and other
+secrets in oglyad's environment never reach them, but code running as your
+user can still read your files.
+
+**don't run oglyad on untrusted code, like an unmerged pull request, with
+credentials around.** the nightly report only checks out terrapkg/packages'
+default branch, and its token is read-only and expires with the job.
+
+the GitHub token is only ever sent to `api.github.com`, and is dropped if a
+request gets redirected anywhere else.
+
+## nightly report
+
+[`report.yml`](.github/workflows/report.yml) runs every night in Terra's
+builder image (`ghcr.io/terrapkg/builder:f44`), so specs evaluate with the
+same macros Terra builds with. it builds oglyad from
+[the Terra spec](packaging/terra), checks terrapkg/packages' default branch
+with `-u --fedora`, writes the markdown report to the run's summary, and keeps
+the markdown and json for 30 days. caches carry over between nights.
+
+## packaging
+
+[`packaging/terra`](packaging/terra) has the spec, `anda.hcl` and
+`update.rhai` for Terra. it builds offline against Fedora's Haskell
+libraries with `%ghc_bin_build`, runs the test suite in `%check`, and ships
+one self-contained binary. CI builds it in a clean Fedora on every push. the
+spec's `Source0` expects a `v<version>` tag on GitHub.
 
 ## formatting
 

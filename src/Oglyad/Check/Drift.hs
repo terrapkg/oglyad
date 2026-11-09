@@ -16,7 +16,7 @@ drift Package {..} = do
 -- pkgUpstreamVer is only populated with --upstream, so this check is silent
 -- by default
 check :: Check
-check _ p@Package {..} = case drift p of
+check _ p = case drift p of
   Just (up, spec, GT) -> [finding' Warn ("upstream has " <> up <> ", spec is at " <> spec)]
   Just (up, spec, LT)
     -- spec ahead of upstream. snapshots (Version: 1.2^20251101git...) built

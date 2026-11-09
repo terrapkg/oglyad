@@ -94,7 +94,10 @@ data Package = Package
     -- | only filled in when upstream lookups ran
     pkgUpstreamVer :: Maybe Text,
     -- | why the upstream lookup failed, if it did
-    pkgUpstreamErr :: Maybe Text
+    pkgUpstreamErr :: Maybe Text,
+    -- | whether the repo this package publishes to was fetched. when it
+    -- wasn't, pkgRepoBuild = Nothing means "unknown", not "never published"
+    pkgRepoChecked :: Bool
   }
   deriving stock (Eq, Show)
 
@@ -138,6 +141,8 @@ data Config = Config
     -- | repo base urls to check for overlap
     cfgFedoraRepos :: [Text],
     -- | %{dist} used when evaluating specs, e.g. .fc44
+    -- | Fedora/Terra release number, e.g. 44
+    cfgRelease :: Int,
     cfgDist :: Text,
     cfgStaleAfter :: NominalDiffTime,
     -- | whether to hit upstream APIs at all
@@ -158,7 +163,11 @@ data Snapshot = Snapshot
     -- | source package names present in Fedora
     snapFedora :: Set Text,
     snapNow :: UTCTime,
-    snapConfig :: Config
+    snapConfig :: Config,
+    -- | the monorepo commit this run looked at
+    snapHead :: Maybe Text,
+    -- | check names each package dir's anda.hcl asks to ignore
+    snapIgnoreLabels :: Map FilePath [Text]
   }
 
 type Check = Snapshot -> Package -> [Finding]

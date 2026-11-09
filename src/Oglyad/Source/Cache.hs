@@ -9,8 +9,9 @@ module Oglyad.Source.Cache
   )
 where
 
-import Control.Exception (SomeException, try)
-import Data.Aeson (FromJSON, ToJSON, eitherDecodeFileStrict, encodeFile)
+import Control.Exception (SomeException, finally, try)
+import Data.Aeson (FromJSON, ToJSON, eitherDecodeFileStrict, encode)
+import Data.ByteString.Lazy qualified as LBS
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Text (Text)
@@ -20,6 +21,7 @@ import GHC.Generics (Generic)
 import Oglyad.Types (UpstreamSource)
 import System.Directory (XdgDirectory (XdgCache), createDirectoryIfMissing, getXdgDirectory, renameFile)
 import System.FilePath ((</>))
+import System.IO (hClose, openBinaryTempFile)
 
 cacheDir :: IO FilePath
 cacheDir = getXdgDirectory XdgCache "oglyad"
@@ -40,8 +42,11 @@ saveJson name x = do
     dir <- cacheDir
     createDirectoryIfMissing True dir
     let path = dir </> name
-    encodeFile (path <> ".tmp") x
-    renameFile (path <> ".tmp") path
+    -- a unique temp name, so two runs at once can't interleave their writes.
+    -- rename is atomic, so readers see the old file or the new one, never half
+    (tmp, h) <- openBinaryTempFile dir (name <> ".tmp")
+    LBS.hPut h (encode x) `finally` hClose h
+    renameFile tmp path
   case r of
     Left (_ :: SomeException) -> pure ()
     Right () -> pure ()

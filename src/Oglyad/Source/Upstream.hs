@@ -10,11 +10,12 @@ import Control.Monad.Reader (liftIO)
 import Data.Aeson (Value (..), eitherDecode)
 import Data.Aeson.Key qualified as Key
 import Data.Aeson.KeyMap qualified as KM
+import Data.Bifunctor (first)
 import Data.List (maximumBy)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Vector qualified as V
-import Oglyad.App (App, httpGetE)
+import Oglyad.App (App, HttpError (..), httpGetE)
 import Oglyad.Process (run)
 import Oglyad.Types (CrateField (..), UpstreamSource (..))
 import Oglyad.Version (normalizeVersion, rpmvercmp)
@@ -23,7 +24,7 @@ import Oglyad.Version (normalizeVersion, rpmvercmp)
 data Step = K Text | I Int
 
 -- | latest upstream version, or a reason we couldn't get it
-latestVersion :: UpstreamSource -> App (Either Text Text)
+latestVersion :: UpstreamSource -> App (Either HttpError Text)
 latestVersion = \case
   GitHub repo -> json ("https://api.github.com/repos/" <> repo <> "/releases/latest") [K "tag_name"]
   GitHubTag repo -> json ("https://api.github.com/repos/" <> repo <> "/tags?per_page=1") [I 0, K "name"]
@@ -43,10 +44,10 @@ latestVersion = \case
     json
       ("https://galaxy.ansible.com/api/v3/plugin/ansible/content/published/collections/index/" <> ns <> "/" <> coll <> "/versions/?limit=1&ordering=-version")
       [K "data", I 0, K "version"]
-  GitTags url -> liftIO (gitTags url)
-  Derived how -> pure (Left ("follows " <> how <> ", not an upstream release"))
-  CommitTracked -> pure (Left "tracks a commit, not a version")
-  Unknown _ -> pure (Left "unparsed update.rhai")
+  GitTags url -> first HttpFailed <$> liftIO (gitTags url)
+  Derived how -> pure (Left (HttpFailed ("follows " <> how <> ", not an upstream release")))
+  CommitTracked -> pure (Left (HttpFailed "tracks a commit, not a version"))
+  Unknown _ -> pure (Left (HttpFailed "unparsed update.rhai"))
   where
     crateKey = \case
       MaxStable -> "max_stable_version"
@@ -54,14 +55,14 @@ latestVersion = \case
       Newest -> "newest_version"
 
 -- | GET a url and walk a path into the json it returns
-json :: Text -> [Step] -> App (Either Text Text)
+json :: Text -> [Step] -> App (Either HttpError Text)
 json url path = do
   body <- httpGetE url
   pure $ do
-    v <- body >>= either (\e -> Left ("bad json from " <> url <> ": " <> T.pack e)) Right . eitherDecode
+    v <- body >>= either (\e -> Left (HttpFailed ("bad json from " <> url <> ": " <> T.pack e))) Right . eitherDecode
     case walk path v of
       Just (String s) | not (T.null s) -> Right s
-      _ -> Left ("no version at expected spot in " <> url)
+      _ -> Left (HttpFailed ("no version at expected spot in " <> url))
 
 walk :: [Step] -> Value -> Maybe Value
 walk [] v = Just v
@@ -71,12 +72,12 @@ walk _ _ = Nothing
 
 -- | opam has no "latest" endpoint. anda lists the package's directory in
 -- ocaml/opam-repository and picks the highest `name.version` entry
-opam :: Text -> App (Either Text Text)
+opam :: Text -> App (Either HttpError Text)
 opam name = do
   let url = "https://api.github.com/repos/ocaml/opam-repository/contents/packages/" <> name
   body <- httpGetE url
   pure $ do
-    v <- body >>= either (Left . T.pack) Right . eitherDecode
+    v <- body >>= either (Left . HttpFailed . T.pack) Right . eitherDecode
     let versions = case v of
           Array entries ->
             [ ver
@@ -86,7 +87,7 @@ opam name = do
             ]
           _ -> []
     case versions of
-      [] -> Left ("no versions listed at " <> url)
+      [] -> Left (HttpFailed ("no versions listed at " <> url))
       _ -> Right (maximumBy rpmvercmp versions)
 
 -- | newest tag on a git remote, for forges without a releases api.

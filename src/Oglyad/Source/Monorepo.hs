@@ -12,7 +12,7 @@ module Oglyad.Source.Monorepo
   )
 where
 
-import Control.Exception (SomeException, try)
+import Control.Exception (IOException, try)
 import Control.Monad (filterM, foldM, forM)
 import Crypto.Hash.SHA256 qualified as SHA256
 import Data.Aeson (FromJSON, ToJSON)
@@ -26,14 +26,13 @@ import Data.Set qualified as Set
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
-import Data.Text.IO qualified as TIO
 import Data.Text.Read qualified as TR
 import Data.Time (UTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
 import GHC.Generics (Generic)
 import Oglyad.Process (run)
 import Oglyad.Version (EVR, parseEVR)
-import System.Directory (XdgDirectory (XdgConfig), doesDirectoryExist, doesFileExist, getHomeDirectory, getXdgDirectory, listDirectory)
+import System.Directory (doesDirectoryExist, doesFileExist, getSymbolicLinkTarget, listDirectory, pathIsSymbolicLink)
 import System.FilePath (takeDirectory, takeExtension, (</>))
 
 -- | a directory with an anda.hcl in it
@@ -45,7 +44,9 @@ data PkgDir = PkgDir
     -- | `subrepo = "extras"` from the labels block
     pdSubrepo :: Maybe Text,
     -- | file contents
-    pdUpdateRhai :: Maybe Text
+    pdUpdateRhai :: Maybe Text,
+    -- | `oglyad_ignore = "check, other-check"` from the labels block
+    pdIgnores :: [Text]
   }
   deriving stock (Eq, Show)
 
@@ -57,31 +58,42 @@ data SpecInfo = SpecInfo
   deriving anyclass (ToJSON, FromJSON)
 
 -- | walk anda/ and return every project directory
-findPackageDirs :: FilePath -> IO [PkgDir]
+-- | walk anda/ and return every project directory. a directory that can't be
+-- read comes back as a Left with the reason, instead of ending the walk.
+-- symlinked directories aren't followed, so a link loop can't hang the walk
+findPackageDirs :: FilePath -> IO [Either (FilePath, Text) PkgDir]
 findPackageDirs root = go "anda"
   where
     go rel = do
       let abs' = root </> rel
-      entries <- listDirectory abs'
-      hasHcl <- doesFileExist (abs' </> "anda.hcl")
-      here <- if hasHcl then pure <$> readPkgDir rel entries else pure []
-      subdirs <- filterM (doesDirectoryExist . (abs' </>)) [e | e <- entries, take 1 e /= "."]
-      nested <- concat <$> forM subdirs (go . (rel </>))
-      pure (here <> nested)
+      listed <- try (listDirectory abs')
+      case listed of
+        Left (e :: IOException) -> pure [Left (rel, T.pack (show e))]
+        Right entries -> do
+          hasHcl <- doesFileExist (abs' </> "anda.hcl")
+          here <- if hasHcl then pure <$> readPkgDir rel entries else pure []
+          subdirs <- filterM (realDir . (abs' </>)) [e | e <- sort entries, take 1 e /= "."]
+          nested <- concat <$> forM subdirs (go . (rel </>))
+          pure (here <> nested)
 
     readPkgDir rel entries = do
+      r <- try (readPkgDir' rel entries)
+      pure (either (\(e :: IOException) -> Left (rel, T.pack (show e))) Right r)
+
+    readPkgDir' rel entries = do
       let abs' = root </> rel
-      hcl <- TIO.readFile (abs' </> "anda.hcl")
+      hcl <- readText (abs' </> "anda.hcl")
       let fromHcl = T.unpack <$> hclString "spec" hcl
           fallback = listToMaybe [e | e <- entries, takeExtension e == ".spec"]
       hasRhai <- doesFileExist (abs' </> "update.rhai")
-      rhai <- if hasRhai then Just <$> TIO.readFile (abs' </> "update.rhai") else pure Nothing
+      rhai <- if hasRhai then Just <$> readText (abs' </> "update.rhai") else pure Nothing
       pure
         PkgDir
           { pdPath = rel,
             pdSpec = (rel </>) <$> maybe fallback Just fromHcl,
             pdSubrepo = hclString "subrepo" hcl,
-            pdUpdateRhai = rhai
+            pdUpdateRhai = rhai,
+            pdIgnores = maybe [] (filter (not . T.null) . map T.strip . T.splitOn ",") (hclString "oglyad_ignore" hcl)
           }
 
 -- | pull the first `key = "value"` out of anda.hcl without a real HCL parser.
@@ -96,10 +108,22 @@ hclString key hcl =
       "\"" `T.isInfixOf` rest
     ]
 
+-- | a directory that isn't a symlink
+realDir :: FilePath -> IO Bool
+realDir path = do
+  isDir <- doesDirectoryExist path
+  isLink <- either (\(_ :: IOException) -> False) id <$> try (pathIsSymbolicLink path)
+  pure (isDir && not isLink)
+
+-- | read a text file as utf-8 no matter the locale, replacing invalid bytes
+-- instead of failing
+readText :: FilePath -> IO Text
+readText path = TE.decodeUtf8Lenient <$> BS.readFile path
+
 -- | let rpm evaluate the spec for us. hand-parsing specs means reimplementing
 -- the macro engine, which is a terrible idea
-querySpec :: Text -> FilePath -> IO (Either Text SpecInfo)
-querySpec dist spec = do
+querySpec :: Int -> Text -> FilePath -> IO (Either Text SpecInfo)
+querySpec release dist spec = do
   let qf = "%{NAME}\t%|EPOCH?{%{EPOCH}}:{0}|:%{VERSION}-%{RELEASE}\n"
   out <-
     run "rpmspec" $
@@ -107,6 +131,10 @@ querySpec dist spec = do
         "--srpm",
         "--define",
         "dist " <> T.unpack dist,
+        -- %fedora comes from the host otherwise, so -r 43 on an F44 box would
+        -- take the wrong side of every %if 0%{?fedora} >= 44
+        "--define",
+        "fedora " <> show release,
         -- some specs load macro files from their own dir via %{_sourcedir}
         "--define",
         "_sourcedir " <> takeDirectory spec,
@@ -171,53 +199,50 @@ specFingerprint macros dist root rel = do
   -- them, which would copy every byte of the package dir once more
   ctx <-
     foldM
-      ( \c f -> do
-          body <- BS.readFile (root </> rel </> f)
+      ( \c (f, entry) -> do
+          body <- case entry of
+            -- hash where a symlink points, never what's behind it
+            Link target -> pure ("<link> " <> TE.encodeUtf8 (T.pack target))
+            File ->
+              either (\(e :: IOException) -> "<unreadable> " <> TE.encodeUtf8 (T.pack (show e))) id
+                <$> try (BS.readFile (root </> rel </> f))
           pure $! SHA256.updates c [TE.encodeUtf8 (T.pack f), "\0", body, "\0"]
       )
       (SHA256.update SHA256.init header)
       files
   pure (TE.decodeUtf8 (B16.encode (SHA256.finalize ctx)))
 
+data Entry = File | Link FilePath
+
 -- | every file under a package dir, relative to it and sorted, skipping
--- subdirectories that are packages of their own
-packageFiles :: FilePath -> IO [FilePath]
+-- subdirectories that are packages of their own. symlinks are recorded with
+-- their target and never followed, so a dangling link or a link loop can't
+-- crash or hang the walk
+packageFiles :: FilePath -> IO [(FilePath, Entry)]
 packageFiles dir = go ""
   where
     go sub = do
-      entries <- sort <$> listDirectory (dir </> sub)
+      listed <- try (listDirectory (dir </> sub))
+      let entries = either (\(_ :: IOException) -> []) sort listed
       fmap concat . forM entries $ \e -> do
         let rel = if null sub then e else sub </> e
-        isDir <- doesDirectoryExist (dir </> rel)
-        isPkg <- doesFileExist (dir </> rel </> "anda.hcl")
-        case (isDir, isPkg) of
-          (True, True) -> pure []
-          (True, False) -> go rel
-          _ -> pure [rel]
+        link <- try (getSymbolicLinkTarget (dir </> rel))
+        case link of
+          Right target -> pure [(rel, Link target)]
+          Left (_ :: IOException) -> do
+            isDir <- doesDirectoryExist (dir </> rel)
+            isPkg <- doesFileExist (dir </> rel </> "anda.hcl")
+            case (isDir, isPkg) of
+              (True, True) -> pure []
+              (True, False) -> go rel
+              _ -> pure [(rel, File)]
 
--- | fingerprint of every rpm macro file that can affect spec evaluation:
--- the system ones (so updating anda-srpm-macros or rpm itself invalidates
--- cached evaluations) and the user's own ~/.rpmmacros and
--- ~/.config/rpm/macros. it hashes contents, which for a few hundred small
--- files is still only a millisecond or two
+-- | fingerprint of the whole rpm macro state, so updating rpm,
+-- redhat-rpm-config or anda-srpm-macros, or editing ~/.rpmmacros, invalidates
+-- cached evaluations. `rpm --showrc` dumps every macro rpm loaded, from every
+-- path in its search list, which is more complete than listing files by hand
 macroFingerprint :: IO Text
 macroFingerprint = do
-  home <- getHomeDirectory
-  xdg <- getXdgDirectory XdgConfig "rpm"
-  let dirs = ["/usr/lib/rpm/macros.d", "/etc/rpm"]
-      single = ["/usr/lib/rpm/macros", "/usr/lib/rpm/rpmrc", home </> ".rpmmacros", xdg </> "macros"]
-  listed <- fmap concat . forM dirs $ \d -> do
-    r <- try (listDirectory d) :: IO (Either SomeException [FilePath])
-    pure (map (d </>) (either (const []) sort r))
-  -- the rpmspec binary itself, by version rather than by bytes
-  version <- either (const "no rpmspec") id <$> run "rpmspec" ["--version"]
-  ctx <-
-    foldM
-      ( \c f -> do
-          r <- try (BS.readFile f) :: IO (Either SomeException BS.ByteString)
-          -- a missing file still counts, so creating ~/.rpmmacros changes the hash
-          pure $! SHA256.updates c [TE.encodeUtf8 (T.pack f), "\0", either (const "<missing>") id r, "\0"]
-      )
-      (SHA256.update SHA256.init (TE.encodeUtf8 version))
-      (single <> listed)
-  pure (TE.decodeUtf8 (B16.encode (SHA256.finalize ctx)))
+  showrc <- either ("no rpm: " <>) id <$> run "rpm" ["--showrc"]
+  version <- either ("no rpmspec: " <>) id <$> run "rpmspec" ["--version"]
+  pure (TE.decodeUtf8 (B16.encode (SHA256.hash (TE.encodeUtf8 (version <> "\0" <> showrc)))))

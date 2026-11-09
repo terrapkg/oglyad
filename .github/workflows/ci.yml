@@ -58,9 +58,10 @@ jobs:
           cabal-version: "3.16.1.0"
           cabal-update: true
 
-      # the lzma and zlib bindings link against the system libraries
-      - name: Install system libraries
-        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends liblzma-dev zlib1g-dev
+      # zlib for http-client's compression support. the tests run the same
+      # tools oglyad does: rpm for macro fingerprints, and the decompressors
+      - name: Install system packages
+        run: sudo apt-get update && sudo apt-get install -y --no-install-recommends zlib1g-dev rpm zstd xz-utils gzip
 
       # warnings fail CI but stay warnings locally. cabal.project.local is
       # gitignored, so this never leaks into anyone's checkout
@@ -102,3 +103,36 @@ jobs:
       # pinned index-state, so they'd just be busywork
       - name: Check the package
         run: cabal check --ignore=missing-upper-bounds
+
+  # builds the Terra package from this commit in a clean Fedora, offline,
+  # against Fedora's own Haskell libraries, with the test suite in %check
+  package:
+    name: terra package
+    runs-on: ubuntu-latest
+    container:
+      image: registry.fedoraproject.org/fedora:44
+    steps:
+      - name: Install git
+        run: dnf5 -y -q install git-core rpm-build dnf5-plugins
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Build the RPM
+        run: |
+          git config --global --add safe.directory "$PWD"
+          version=$(rpmspec -q --srpm --qf '%{version}' packaging/terra/oglyad.spec)
+          git archive --prefix="oglyad-$version/" -o "$RUNNER_TEMP/oglyad-$version.tar.gz" HEAD
+          dnf5 -y -q builddep packaging/terra/oglyad.spec
+          # build as a regular user, like a real package build. the test
+          # suite in %check makes git repos and reads ~/.rpmmacros
+          useradd -m builder
+          cp packaging/terra/oglyad.spec "$RUNNER_TEMP/"
+          chown -R builder "$RUNNER_TEMP"
+          su builder -c "rpmbuild -ba --define '_sourcedir $RUNNER_TEMP' --define '_topdir $RUNNER_TEMP/rpmbuild' $RUNNER_TEMP/oglyad.spec"
+
+      - name: Install and run it
+        run: |
+          dnf5 -y -q install "$RUNNER_TEMP"/rpmbuild/RPMS/*/oglyad-*.rpm
+          oglyad --version
