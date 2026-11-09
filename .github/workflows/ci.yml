@@ -110,7 +110,7 @@ jobs:
     name: terra package
     runs-on: ubuntu-latest
     container:
-      image: registry.fedoraproject.org/fedora:44
+      image: ghcr.io/terrapkg/builder:44
     steps:
       - name: Install git
         run: dnf5 -y -q install git-core rpm-build dnf5-plugins
