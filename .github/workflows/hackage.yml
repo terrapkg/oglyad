@@ -1,0 +1,86 @@
+name: hackage
+
+# pushing a v<version> tag publishes that release to Hackage. running this by
+# hand uploads a package candidate instead, for previewing the Hackage page
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: "publish for real instead of uploading a candidate"
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}
+  cancel-in-progress: false
+
+jobs:
+  upload:
+    runs-on: ubuntu-latest
+    # holds the HACKAGE_TOKEN secret, so other workflows can't read it
+    environment: hackage
+    container:
+      image: ghcr.io/terrapkg/builder:f45
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Install ghc and cabal
+        run: dnf5 -y -q install ghc cabal-install zlib-ng-compat-devel
+
+      - name: Check the tag matches the cabal version
+        if: github.event_name == 'push'
+        run: |
+          version=$(sed -n 's/^version:[[:space:]]*//p' oglyad.cabal)
+          if [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "tag $GITHUB_REF_NAME doesn't match version $version in oglyad.cabal"
+            exit 1
+          fi
+
+      # the exact tarball that gets uploaded is the one built and tested here
+      - name: Build the sdist
+        id: sdist
+        run: |
+          cabal update
+          cabal check
+          cabal sdist -o "$RUNNER_TEMP"
+          tarball=$(ls "$RUNNER_TEMP"/oglyad-*.tar.gz)
+          echo "TARBALL=$tarball" >> "$GITHUB_ENV"
+          tar -xzf "$tarball" -C "$RUNNER_TEMP"
+          cd "$RUNNER_TEMP"/oglyad-*/
+          echo "SDIST_DIR=$PWD" >> "$GITHUB_ENV"
+          printf 'packages: .\n' > cabal.project
+          printf 'package oglyad\n  ghc-options: -Werror\n' > cabal.project.local
+          cabal build all --enable-tests --dry-run
+          echo "plan=$(sha256sum dist-newstyle/cache/plan.json | cut -c1-16)" >> "$GITHUB_OUTPUT"
+
+      # shares CI's dependency cache, read-only
+      - name: Restore cabal store
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ~/.local/state/cabal/store
+          key: hackage-${{ steps.sdist.outputs.plan }}
+          restore-keys: hackage-
+
+      - name: Build and test
+        working-directory: ${{ env.SDIST_DIR }}
+        run: |
+          cabal build all --enable-tests
+          cabal test all --test-show-details=direct
+
+      - name: Upload
+        env:
+          HACKAGE_TOKEN: ${{ secrets.HACKAGE_TOKEN }}
+          PUBLISH: ${{ github.event_name == 'push' || inputs.publish }}
+        run: |
+          if [ "$PUBLISH" = "true" ]; then
+            cabal upload --publish --token "$HACKAGE_TOKEN" "$TARBALL"
+          else
+            cabal upload --token "$HACKAGE_TOKEN" "$TARBALL"
+          fi

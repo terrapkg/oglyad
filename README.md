@@ -162,6 +162,20 @@ binary. [`package-git.yml`](.github/workflows/package-git.yml) builds
 `oglyad-git` on x86_64 and aarch64 for every push to main and every pull
 request that touches the code.
 
+## releasing
+
+1. bump `version` in `oglyad.cabal` and `oglyad.spec`, and add a
+   `CHANGELOG.md` entry
+2. push a `v<version>` tag, e.g. `v0.1.0.0`
+
+[`hackage.yml`](.github/workflows/hackage.yml) checks the tag matches the
+cabal version, builds and tests the sdist, and publishes it to Hackage. the
+same tag is what `oglyad.spec` downloads. to preview a release first, run the
+workflow by hand, which uploads a Hackage package candidate instead.
+
+it needs a `HACKAGE_TOKEN` secret (an API token from your Hackage account) in
+a GitHub environment named `hackage`.
+
 ## formatting
 
 code is formatted with [ormolu](https://github.com/tweag/ormolu) 0.9.0.0, and

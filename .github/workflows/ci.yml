@@ -18,6 +18,8 @@ jobs:
   format:
     name: formatting
     runs-on: arc-runner-set
+    container:
+      image: ghcr.io/terrapkg/builder:f45
     env:
       # keep in sync with the ormolu in ~/.local/bin, which Zed formats with.
       # the hash is the digest GitHub publishes for the release asset
@@ -84,9 +86,10 @@ jobs:
           persist-credentials: false
 
       - name: Install ghc and cabal
-        run: dnf5 -y -q install ghc cabal-install zlib-devel
+        run: dnf5 -y -q install ghc cabal-install zlib-ng-compat-devel
 
       - name: Unpack the sdist
+        id: sdist
         run: |
           cabal update
           cabal sdist -o "$RUNNER_TEMP"
@@ -96,13 +99,14 @@ jobs:
           printf 'packages: .\n' > cabal.project
           printf 'package oglyad\n  ghc-options: -Werror\n' > cabal.project.local
           cabal build all --enable-tests --dry-run
+          echo "plan=$(sha256sum dist-newstyle/cache/plan.json | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
       - name: Restore cabal store
         id: cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: ~/.local/state/cabal/store
-          key: hackage-${{ hashFiles(format('{0}/dist-newstyle/cache/plan.json', env.SDIST_DIR)) }}
+          key: hackage-${{ steps.sdist.outputs.plan }}
           restore-keys: hackage-
 
       - name: Build dependencies
