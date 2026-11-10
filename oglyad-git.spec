@@ -1,7 +1,7 @@
 # the test suite runs offline and only needs git, rpm and the decompressors
 %bcond tests 1
 
-%global _version 0.1.2.0
+%global _version 0.1.3.0
 
 Name:           oglyad
 Version:        %{_version}^%{autogitversion}

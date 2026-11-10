@@ -1,6 +1,6 @@
 cabal-version:   3.0
 name:            oglyad
-version:         0.1.2.0
+version:         0.1.3.0
 synopsis:        repository metadata and health checker for Terra
 description:
   oglyad checks a terrapkg/packages checkout against Terra's published
