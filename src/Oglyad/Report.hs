@@ -32,6 +32,8 @@ data Report = Report
     rGenerated :: UTCTime,
     -- | every release this run checked, in order
     rReleases :: [ReleaseInfo],
+    -- | "terra", "ultramarine"
+    rDistro :: Text,
     rUpstream :: Bool,
     rFindings :: [Finding],
     rIgnored :: [Finding]
@@ -46,7 +48,7 @@ data ReleaseInfo = ReleaseInfo
     -- | the git ref the specs came from, Nothing for the working tree
     riRef :: Maybe Text,
     riCommit :: Maybe Text,
-    riTerraRepo :: Text
+    riRepo :: Text
   }
 
 render :: Format -> Severity -> Report -> LBS.ByteString
@@ -90,13 +92,15 @@ renderJson Report {..} =
       [ "schema" .= (2 :: Int),
         "oglyad" .= rVersion,
         "generated" .= rGenerated,
+        "distro" .= rDistro,
         "releases"
           .= [ object
                  [ "release" .= riName,
                    "label" .= riLabel,
                    "ref" .= riRef,
                    "commit" .= riCommit,
-                   "terra_repo" .= riTerraRepo
+                   -- named for Terra, but it's whichever distro's repo was checked
+                   "terra_repo" .= riRepo
                  ]
              | ReleaseInfo {..} <- rReleases
              ],
@@ -130,7 +134,7 @@ renderJson Report {..} =
 renderMarkdown :: Severity -> Report -> Text
 renderMarkdown minSev r@Report {..} =
   T.unlines $
-    [ "# oglyad report",
+    [ "# oglyad report: " <> rDistro,
       "",
       T.intercalate
         " · "

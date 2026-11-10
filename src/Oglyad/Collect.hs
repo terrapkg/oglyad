@@ -44,12 +44,10 @@ buildSnapshot = do
   let (root, logRef, hd, treeErrs) = case tree of
         Right (r, l, h) -> (Just r, l, h, [])
         Left err -> (Nothing, "HEAD", Nothing, [collectErr (maybe "monorepo" id cfgSpecRef) err])
-  (dirErrs, dirs) <- partitionEithers <$> liftIO (maybe (pure []) findPackageDirs root)
+  (dirErrs, dirs) <- partitionEithers <$> liftIO (maybe (pure []) (`findPackageDirs` cfgRoot) root)
 
   -- the main repo, every subrepo some package asked for, and Fedora
-  let terraRepos =
-        (Nothing, cfgTerraRepo)
-          : [(Just s, cfgTerraRepo <> "-" <> s) | s <- nub (mapMaybe pdSubrepo dirs)]
+  let terraRepos = [(s, repoUrl cfg s) | s <- Nothing : nub (map Just (mapMaybe pdSubrepo dirs))]
   env <- ask
   ((specErrs, pkgs0), (terra, fedora)) <-
     liftIO $
@@ -111,7 +109,7 @@ readPackages root0 logRef hd dirs = do
   (commits, (macros, cache)) <-
     liftIO $
       concurrently
-        (commitTimes cfgMonorepo logRef hd cfgDist (map pdPath dirs))
+        (commitTimes cfgMonorepo cfgRoot logRef hd cfgDist (map pdPath dirs))
         ((,) <$> macroFingerprint <*> (fromMaybe Map.empty <$> loadJson cacheFile))
   keyed <- forConcurrentlyN cfgConcurrency dirs $ \d -> liftIO $ do
     key <- specFingerprint macros cfgDist root (pdPath d)
@@ -150,14 +148,14 @@ data SpecResult
 -- | last commit per package dir, reused as long as the commit hasn't moved.
 -- uncommitted changes can't change any "last commit", so the commit is the
 -- whole key. one cache file per dist, since each release reads its own branch
-commitTimes :: FilePath -> Text -> Maybe Text -> Text -> [FilePath] -> IO (Map FilePath UTCTime)
-commitTimes mono ref hd dist dirs = do
+commitTimes :: FilePath -> FilePath -> Text -> Maybe Text -> Text -> [FilePath] -> IO (Map FilePath UTCTime)
+commitTimes mono pkgRoot ref hd dist dirs = do
   let file = "commits" <> T.unpack dist <> ".json"
   cached <- loadJson file
   case (hd, cached) of
     (Just h, Just (h', m)) | h == h', all (`Map.member` m) dirs -> pure m
     _ -> do
-      m <- lastCommits mono ref dirs
+      m <- lastCommits mono pkgRoot ref dirs
       mapM_ (\h -> saveJson file (h, m)) hd
       pure m
 

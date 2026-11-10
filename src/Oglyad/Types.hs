@@ -9,6 +9,7 @@ module Oglyad.Types
     finding,
     Snapshot (..),
     Config (..),
+    repoUrl,
     Check,
   )
 where
@@ -151,21 +152,27 @@ finding check p sev msg =
     }
 
 data Config = Config
-  { -- | local checkout of terrapkg/packages
+  { -- | local checkout of terrapkg/packages, or another anda monorepo
     cfgMonorepo :: FilePath,
+    -- | the directory in it holding every package, e.g. anda
+    cfgRoot :: FilePath,
     -- | git ref to read specs from, e.g. origin/f43. Nothing reads the
     -- working tree of cfgMonorepo as it is
     cfgSpecRef :: Maybe Text,
-    -- | the terrapkg/packages branch name, f43 or frawhide. update.rhai
+    -- | the monorepo branch name, f43 or frawhide. update.rhai
     -- scripts see it as labels.branch
     cfgBranch :: Text,
-    -- | e.g. https://repos.fyralabs.com/terra44
-    cfgTerraRepo :: Text,
+    -- | the main repo's name, e.g. terra44
+    cfgRepoName :: Text,
+    -- | where it is: a metalink or a base url, with {repo} where the repo
+    -- name goes. without {repo} it's the main repo's url, and subrepos add
+    -- -extras to the end of it
+    cfgRepoUrl :: Text,
     -- | repo base urls to check for overlap
     cfgFedoraRepos :: [Text],
     -- | Fedora/Terra release number, e.g. 44. rawhide has one too
     cfgRelease :: Int,
-    -- | %{dist} used when evaluating specs, e.g. .fc44 or .fcrawhide
+    -- | %{dist} used when evaluating specs, e.g. .fc44, .fcrawhide or .um44
     cfgDist :: Text,
     cfgStaleAfter :: NominalDiffTime,
     -- | whether to hit upstream APIs at all
@@ -181,6 +188,14 @@ data Config = Config
     cfgGitHubToken :: Maybe Text
   }
   deriving stock (Show)
+
+-- | the url of the main repo, or of a subrepo like extras
+repoUrl :: Config -> Maybe Text -> Text
+repoUrl Config {..} sub
+  | "{repo}" `T.isInfixOf` cfgRepoUrl = T.replace "{repo}" (cfgRepoName <> suffix) cfgRepoUrl
+  | otherwise = cfgRepoUrl <> suffix
+  where
+    suffix = maybe "" ("-" <>) sub
 
 -- | everything a check is allowed to look at, already collected.
 -- checks never do IO, which is what keeps them trivially testable

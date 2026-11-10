@@ -5,11 +5,10 @@
 module Main (main) where
 
 import Control.Exception (SomeException, try)
-import Control.Monad (forM, unless, when)
+import Control.Monad (filterM, forM, unless, when)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.List (nub)
-import Data.Maybe (isJust)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime, getCurrentTime)
@@ -38,8 +37,10 @@ exitFindings = ExitFailure 1
 exitUsage = ExitFailure 2
 
 data Opts = Opts
-  { -- | token, cores, run start, spec ref, release
-    optConfig :: Maybe Text -> Int -> UTCTime -> Maybe Text -> Release -> Config,
+  { -- | token, cores, run start, spec ref, distro, release
+    optConfig :: Maybe Text -> Int -> UTCTime -> Maybe Text -> Distro -> Release -> Config,
+    -- | Nothing means tell from the checkout
+    optDistro :: Maybe Distro,
     optReleases :: [ReleaseArg],
     optRemote :: Text,
     optWorktree :: Bool,
@@ -56,10 +57,11 @@ data Opts = Opts
 optsP :: Parser Opts
 optsP = do
   optConfig <- configP
+  optDistro <- optional (option (eitherReader lookupDistro) (long "distro" <> short 'd' <> metavar "NAME" <> help ("which monorepo -m is: " <> distroNames <> ". default: whichever one's package directory (anda/, ultramarine/) the checkout has")))
   optReleases <- many (option (eitherReader parseReleaseArg) (long "release" <> short 'r' <> metavar "RELEASE" <> help "release to check: 43, f43 or rawhide. repeatable. default: every release Fedora's Bodhi hasn't archived"))
-  optRemote <- strOption (long "remote" <> metavar "NAME" <> value "origin" <> showDefault <> help "git remote whose release branches (f43, frawhide, ...) hold each release's specs. nothing is fetched, run git fetch yourself")
+  optRemote <- strOption (long "remote" <> metavar "NAME" <> value "origin" <> showDefault <> help "git remote whose release branches (f43, frawhide, um43, ...) hold each release's specs. nothing is fetched, run git fetch yourself")
   optWorktree <- switch (long "worktree" <> help "read specs from the checkout as it is, local edits included, instead of the release branch. needs exactly one --release")
-  optRepo <- optional (strOption (long "repo" <> metavar "URL" <> help "Terra repo base url (default: https://repos.fyralabs.com/terraN). needs exactly one --release"))
+  optRepo <- optional (strOption (long "repo" <> metavar "URL" <> help ("metalink or base url of the repo to check builds against. {repo} becomes the repo's name (terra43, terra43-extras) and {release} the release's (43, rawhide). a url with neither names one release's repo, so it needs exactly one --release. default: " <> T.unpack defaultRepoUrl)))
   optOnly <- many (option (eitherReader parseCheckName) (long "only" <> metavar "CHECK" <> help ("run only this check, repeatable. one of: " <> names)))
   optFormat <-
     option (eitherReader format) (long "format" <> short 'f' <> metavar "FORMAT" <> help "text (default), json, or markdown")
@@ -74,6 +76,7 @@ optsP = do
   pure Opts {..}
   where
     names = T.unpack (T.intercalate ", " checkNames)
+    distroNames = T.unpack (T.intercalate ", " (map distroName distros))
     format = \case
       "text" -> Right Text
       "json" -> Right Json
@@ -86,22 +89,24 @@ optsP = do
       "never" -> Right Nothing
       other -> Left ("unknown level " <> show other <> ", expected error, warn, info or never")
 
-configP :: Parser (Maybe Text -> Int -> UTCTime -> Maybe Text -> Release -> Config)
+configP :: Parser (Maybe Text -> Int -> UTCTime -> Maybe Text -> Distro -> Release -> Config)
 configP = do
-  cfgMonorepo <- strOption (long "monorepo" <> short 'm' <> metavar "DIR" <> value "." <> showDefault <> help "checkout of terrapkg/packages")
+  cfgMonorepo <- strOption (long "monorepo" <> short 'm' <> metavar "DIR" <> value "." <> showDefault <> help "checkout of terrapkg/packages, or Ultramarine-Linux/packages with --distro ultramarine")
   fedora <- switch (long "fedora" <> help "also check for overlap with Fedora's release and updates repos (downloads ~60MB per release)")
   extraFedora <- many (strOption (long "fedora-repo" <> metavar "URL" <> help "extra repo base url to check for overlap, repeatable"))
   staleDays <- option auto (long "stale-days" <> metavar "N" <> value (180 :: Int) <> showDefault <> help "builds older than this count as stale")
   cfgUpstream <- switch (long "upstream" <> short 'u' <> help "query upstream APIs for version drift")
   cacheHours <- option auto (long "cache-hours" <> metavar "N" <> value (6 :: Int) <> showDefault <> help "reuse upstream answers younger than this, 0 to always refetch")
   jobs <- optional (option auto (long "jobs" <> short 'j' <> metavar "N" <> help "parallel jobs (default: number of cores)"))
-  pure $ \cfgGitHubToken cores cfgRunStart cfgSpecRef rel ->
+  pure $ \cfgGitHubToken cores cfgRunStart cfgSpecRef distro rel ->
     Config
-      { cfgTerraRepo = terraRepoFor rel,
+      { cfgRoot = distroRoot distro,
+        cfgRepoName = repoName distro rel,
+        cfgRepoUrl = repoUrlFor defaultRepoUrl rel,
         cfgFedoraRepos = (if fedora then fedoraReposFor rel else []) <> extraFedora,
         cfgRelease = relVersion rel,
-        cfgDist = releaseDist rel,
-        cfgBranch = releaseBranch rel,
+        cfgDist = releaseDist distro rel,
+        cfgBranch = releaseBranch distro rel,
         cfgStaleAfter = fromIntegral (staleDays * 86400),
         cfgCacheFor = fromIntegral (cacheHours * 3600),
         cfgConcurrency = maybe cores id jobs,
@@ -151,7 +156,7 @@ parseOpts = do
   let pinfo =
         info
           (optsP <**> helper <**> simpleVersioner ("oglyad " <> T.unpack oglyadVersion))
-          (fullDesc <> progDesc "repository metadata and health checker for Terra")
+          (fullDesc <> progDesc "repository metadata and health checker for Terra and other anda monorepos")
   case execParserPure defaultPrefs pinfo args of
     Failure f -> case renderFailure f prog of
       -- --help and --version are output, not errors, so they go to stdout
@@ -159,6 +164,22 @@ parseOpts = do
       (msg, ExitSuccess) -> putStrLn msg >> exitWith ExitSuccess
       (msg, _) -> hPutStrLn stderr msg >> exitWith exitUsage
     other -> handleParseResult other
+
+-- | the distro asked for, or the one whose package directory the checkout
+-- has. a checkout with none, or with more than one, has to say
+pickDistro :: FilePath -> Maybe Distro -> IO Distro
+pickDistro mono asked = do
+  found <- filterM (doesDirectoryExist . (mono </>) . distroRoot) distros
+  case asked of
+    Just d
+      | d `elem` found -> pure d
+      | otherwise -> usageError (mono <> " doesn't look like a " <> T.unpack (distroName d) <> " checkout (no " <> distroRoot d <> "/ directory). point -m at one")
+    Nothing -> case found of
+      [d] -> pure d
+      [] -> usageError (mono <> " doesn't look like an anda monorepo (no " <> roots <> " directory). point -m at a checkout of terrapkg/packages or another, see --distro")
+      _ -> usageError (mono <> " has more than one package directory (" <> T.unpack (T.intercalate ", " (map distroName found)) <> "), so pick one with --distro")
+  where
+    roots = T.unpack (T.intercalate "/, " (map (T.pack . distroRoot) distros)) <> "/"
 
 usageError :: String -> IO a
 usageError msg = hPutStrLn stderr ("oglyad: " <> msg) >> exitWith exitUsage
@@ -180,18 +201,17 @@ main = do
         Right bytes -> either (\e -> usageError (path <> ": " <> e)) pure (parseIgnoreFile checkNames bytes)
   when (optWorktree && length optReleases /= 1) $
     usageError "--worktree checks the working tree against one release, so it needs exactly one --release"
-  when (isJust optRepo && length optReleases /= 1) $
-    usageError "--repo names one Terra repo, so it needs exactly one --release"
+  when (maybe False (\url -> not (any (`T.isInfixOf` url) ["{repo}", "{release}"])) optRepo && length optReleases /= 1) $
+    usageError "--repo without {repo} or {release} in it names one repo, so it needs exactly one --release"
   token <- githubToken
   cores <- getNumProcessors
   start <- getCurrentTime
-  let specRef rel = if optWorktree then Nothing else Just (optRemote <> "/" <> releaseBranch rel)
+  let mono = cfgMonorepo (optConfig token cores start Nothing terra (Release "rawhide" 0))
+  distro <- pickDistro mono optDistro
+  let specRef rel = if optWorktree then Nothing else Just (optRemote <> "/" <> releaseBranch distro rel)
       mkCfg rel =
-        let c = optConfig token cores start (specRef rel) rel
-         in maybe c (\url -> c {cfgTerraRepo = url}) optRepo
-  hasAnda <- doesDirectoryExist (cfgMonorepo (mkCfg (Release "rawhide" 0)) </> "anda")
-  unless hasAnda $
-    usageError (cfgMonorepo (mkCfg (Release "rawhide" 0)) <> " doesn't look like a terrapkg/packages checkout (no anda/ directory). point -m at one")
+        let c = optConfig token cores start (specRef rel) distro rel
+         in maybe c (\url -> c {cfgRepoUrl = repoUrlFor url rel}) optRepo
   releases <- resolveReleases mkCfg optReleases
 
   let ran = if null optOnly then checkNames else optOnly
@@ -203,14 +223,14 @@ main = do
         applied
           | optNoIgnores = Applied findings [] [] []
           | otherwise = applyIgnores checkNames ran ignores (snapIgnoreLabels snap) findings
-        relInfo = ReleaseInfo (relName rel) (releaseLabel rel) (cfgSpecRef cfg) (snapHead snap) (cfgTerraRepo cfg)
+        relInfo = ReleaseInfo (relName rel) (releaseLabel rel) (cfgSpecRef cfg) (snapHead snap) (repoUrl cfg Nothing)
     pure (rel, relInfo, applied)
   -- extracted trees for commits nothing checks anymore are just disk space
   unless optWorktree $
     pruneTrees [c | (_, ReleaseInfo {riCommit = Just c}, _) <- perRelease]
 
   now <- getCurrentTime
-  let merged f = mergeFindings [(rel, f a) | (rel, _, a) <- perRelease]
+  let merged f = mergeFindings distro [(rel, f a) | (rel, _, a) <- perRelease]
       -- an ignore entry is only unused if no release needed it
       unused = [f | f <- merged apUnused, length (fReleases f) == length releases]
       report =
@@ -218,6 +238,7 @@ main = do
           { rVersion = oglyadVersion,
             rGenerated = now,
             rReleases = [ri | (_, ri, _) <- perRelease],
+            rDistro = distroName distro,
             rUpstream = any (\(rel, _, _) -> cfgUpstream (mkCfg rel)) perRelease,
             rFindings = merged apKept <> merged apProblems <> unused,
             rIgnored = merged apIgnored

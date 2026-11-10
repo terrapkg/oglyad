@@ -1,4 +1,4 @@
--- | reads a local checkout of terrapkg/packages
+-- | reads a local checkout of terrapkg/packages, or another anda monorepo
 module Oglyad.Source.Monorepo
   ( PkgDir (..),
     SpecInfo (..),
@@ -70,11 +70,12 @@ data SpecInfo = SpecInfo
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
--- | walk anda/ and return every project directory. a directory that can't be
--- read comes back as a Left with the reason, instead of ending the walk.
--- symlinked directories aren't followed, so a link loop can't hang the walk
-findPackageDirs :: FilePath -> IO [Either (FilePath, Text) PkgDir]
-findPackageDirs root = go "anda"
+-- | walk the package dir (anda/ in terrapkg/packages) and return every
+-- project directory. a directory that can't be read comes back as a Left
+-- with the reason, instead of ending the walk. symlinked directories aren't
+-- followed, so a link loop can't hang the walk
+findPackageDirs :: FilePath -> FilePath -> IO [Either (FilePath, Text) PkgDir]
+findPackageDirs root pkgRoot = go pkgRoot
   where
     go rel = do
       let abs' = root </> rel
@@ -197,11 +198,11 @@ querySpec release dist spec = do
 -- ~25s of cpu. one pass listing every changed file per commit takes ~0.5s,
 -- and since git lists newest commits first, the first time we see a path
 -- under a dir is that dir's last commit
-lastCommits :: FilePath -> Text -> [FilePath] -> IO (Map FilePath UTCTime)
-lastCommits root ref dirs = do
+lastCommits :: FilePath -> FilePath -> Text -> [FilePath] -> IO (Map FilePath UTCTime)
+lastCommits root pkgRoot ref dirs = do
   out <-
     run "git" $
-      ["-C", root, "-c", "core.quotePath=false", "log", "--format=@%ct", "--name-only", "--no-renames", T.unpack ref, "--", "anda"]
+      ["-C", root, "-c", "core.quotePath=false", "log", "--format=@%ct", "--name-only", "--no-renames", T.unpack ref, "--", pkgRoot]
   -- not a git checkout (or no git at all) just means no commit times
   pure (either (const Map.empty) (go Nothing Map.empty . T.lines) out)
   where

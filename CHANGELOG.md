@@ -1,5 +1,18 @@
 # changelog
 
+## 0.1.3.0
+
+- checks Ultramarine-Linux/packages too: `-d`/`--distro ultramarine` reads
+  `ultramarine/`, the `um43` branches and the `um43` repos with `.um43`
+  dist tags. without `--distro`, oglyad picks whichever distro's package
+  directory the checkout has
+- repos are found through tetsudou's metalinks, like dnf, instead of
+  `repos.fyralabs.com` directly. a mirror whose repomd.xml doesn't match the
+  metalink's checksums is skipped
+- `--repo` takes `{repo}` and `{release}` placeholders, so one url can
+  cover every release and subrepo. it can be a metalink or a base url
+- json and markdown reports name the distro
+
 ## 0.1.2.0
 
 - checks every maintained release by default (today f43, f44, f45 and

@@ -12,6 +12,7 @@ oglyad -m ../packages --fedora   # plus overlap with Fedora
 oglyad -m ../packages -r 44 -r rawhide   # just these releases
 oglyad -m ../packages -r rawhide --worktree   # your local edits, against rawhide
 oglyad -m ../packages --only drift --format json
+oglyad -m ../um-packages          # Ultramarine-Linux/packages works too
 ```
 
 from a checkout, `cabal run oglyad -- <args>` and `cabal test`. it needs
@@ -35,8 +36,36 @@ fetched either, so `git fetch` first if the branches are old. `--remote`
 picks a remote other than `origin`.
 
 `--worktree` reads specs from the checkout as it is, local edits included,
-and needs exactly one `--release`. `--repo` points one release at a
-different Terra repo.
+and needs exactly one `--release`.
+
+## distros and repos
+
+oglyad checks any anda monorepo it knows the layout of. `-d`/`--distro`
+picks one, and by default it's whichever one's package directory the
+checkout has:
+
+| distro        | monorepo                   | packages in    | branches            | repos                       | dist                  |
+| ------------- | -------------------------- | -------------- | ------------------- | --------------------------- | --------------------- |
+| `terra`       | terrapkg/packages          | `anda/`        | `f43`, `frawhide`   | `terra43`, `terra43-extras` | `.fc43`, `.fcrawhide` |
+| `ultramarine` | Ultramarine-Linux/packages | `ultramarine/` | `um43`, `umrawhide` | `um43`                      | `.um43`, `.umrawhide` |
+
+builds are looked up through the same metalink dnf uses,
+`https://tetsudou.fyralabs.com/metalink?repo={repo}&arch=x86_64`. oglyad
+tries its mirrors by preference and takes the first repomd.xml whose sha256
+the metalink lists, so a mirror that hasn't synced yet is skipped.
+
+`--repo` swaps that url for another one. `{repo}` becomes the repo's name
+(`terra43`, or `terra43-extras` for a subrepo) and `{release}` the release's
+(`43`, `rawhide`). a url with `metalink` in it is read as a metalink, and
+anything else as a base url with `repodata/` under it:
+
+```sh
+oglyad -m ../packages --repo 'https://repos.fyralabs.com/{repo}'   # skip the metalink
+oglyad -m ../packages -r 44 --repo https://mirror.example/terra44  # one release's repo
+```
+
+a url with neither placeholder only names one release's repo, so it needs
+exactly one `--release`. subrepos get `-extras` and so on added to its end.
 
 findings from several releases are merged. one that comes up in only some
 of them is tagged, like `anki [f44, f45]: ...`, and messages that only
@@ -49,9 +78,9 @@ differ by dist tag are merged with `%{dist}` in its place:
 summaries) or `json`. the json is a versioned envelope:
 
 ```json
-{"schema": 2, "oglyad": "0.1.0.0", "generated": "...",
+{"schema": 2, "oglyad": "0.1.0.0", "generated": "...", "distro": "terra",
  "releases": [{"release": "43", "label": "f43", "ref": "origin/f43",
-               "commit": "...", "terra_repo": "https://repos.fyralabs.com/terra43"}],
+               "commit": "...", "terra_repo": "https://tetsudou.fyralabs.com/metalink?repo=terra43&arch=x86_64"}],
  "upstream": true,
  "summary": {"error": 0, "warn": 0, "info": 0, "ignored": 0},
  "findings": [{"check": "...", "package": "...", "path": "...", "severity": "...",
@@ -61,13 +90,14 @@ summaries) or `json`. the json is a versioned envelope:
 
 `schema` changes on any breaking change to the json. schema 2 replaced
 `monorepo_head` and `terra_repo` with `releases`, and added `releases` to
-findings. `ref` is `null` with `--worktree`.
+findings. `ref` is `null` with `--worktree`. `distro` was added later, and
+`terra_repo` keeps its name for whichever distro's repo was checked.
 
 | exit | meaning                                                                            |
 | ---- | ---------------------------------------------------------------------------------- |
 | 0    | ran, nothing at or above `--fail-on` (default `error`, or `warn`, `info`, `never`) |
 | 1    | ran, and found something at or above `--fail-on`                                   |
-| 2    | couldn't run: bad flags, unreadable ignore file, not a monorepo                    |
+| 2    | couldn't run: bad flags, unreadable ignore file, not a monorepo oglyad knows       |
 
 ## ignoring known findings
 

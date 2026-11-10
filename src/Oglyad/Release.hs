@@ -1,13 +1,21 @@
--- | which Fedora/Terra releases to check, and everything that follows from
--- one: the Terra repo, the %{dist} tag, the terrapkg/packages branch and the
--- Fedora repos. also merges findings from several releases into one report
+-- | which Fedora releases to check, and everything that follows from one and
+-- the distro being checked: the repo, the %{dist} tag, the monorepo branch
+-- and the Fedora repos. also merges findings from several releases into one
+-- report
 module Oglyad.Release
-  ( Release (..),
+  ( Distro (..),
+    terra,
+    ultramarine,
+    distros,
+    lookupDistro,
+    Release (..),
     isRawhide,
     releaseLabel,
     releaseDist,
     releaseBranch,
-    terraRepoFor,
+    repoName,
+    defaultRepoUrl,
+    repoUrlFor,
     fedoraReposFor,
     parseReleaseArg,
     ReleaseArg (..),
@@ -30,6 +38,40 @@ import Data.Vector qualified as V
 import Oglyad.Types (Finding (..))
 import Text.Read (readMaybe)
 
+-- | an anda monorepo oglyad knows how to check, and how it spells things per
+-- release
+data Distro = Distro
+  { -- | what --distro takes, e.g. "terra"
+    distroName :: Text,
+    -- | the directory under the monorepo root holding every package, e.g.
+    -- "anda" for terrapkg/packages
+    distroRoot :: FilePath,
+    -- | the repo's name, with the release name appended: terra for terra43
+    distroRepo :: Text,
+    -- | release branch prefix, f for f43
+    distroBranch :: Text,
+    -- | %{dist} prefix, .fc for .fc43
+    distroDist :: Text
+  }
+  deriving stock (Eq, Show)
+
+-- | terrapkg/packages
+terra :: Distro
+terra = Distro "terra" "anda" "terra" "f" ".fc"
+
+-- | Ultramarine-Linux/packages. builds land in um43, umrawhide, with
+-- .um43 and .umrawhide dist tags
+ultramarine :: Distro
+ultramarine = Distro "ultramarine" "ultramarine" "um" "um" ".um"
+
+distros :: [Distro]
+distros = [terra, ultramarine]
+
+lookupDistro :: String -> Either String Distro
+lookupDistro raw = case [d | d <- distros, distroName d == T.pack raw] of
+  d : _ -> Right d
+  [] -> Left ("unknown distro " <> show raw <> ", expected one of: " <> T.unpack (T.intercalate ", " (map distroName distros)))
+
 -- | a Fedora release Terra builds for. rawhide keeps its number too, since
 -- %fedora still needs one when evaluating specs
 data Release = Release
@@ -43,22 +85,34 @@ data Release = Release
 isRawhide :: Release -> Bool
 isRawhide r = relName r == "rawhide"
 
--- | how releases are spelled in output: f43, rawhide. matches the
--- terrapkg/packages branch names minus rawhide's "f"
+-- | how releases are spelled in output: f43, rawhide. the same for every
+-- distro, since they're all built on Fedora's releases
 releaseLabel :: Release -> Text
 releaseLabel r = if isRawhide r then "rawhide" else "f" <> relName r
 
 -- | rawhide builds use .fcrawhide, not .fc46. terrapkg/packages' bootstrap
--- workflow rewrites macros.dist to do it
-releaseDist :: Release -> Text
-releaseDist r = ".fc" <> relName r
+-- workflow rewrites macros.dist to do it, and Ultramarine does the same
+releaseDist :: Distro -> Release -> Text
+releaseDist d r = distroDist d <> relName r
 
--- | the terrapkg/packages branch for a release: f43, frawhide
-releaseBranch :: Release -> Text
-releaseBranch r = "f" <> relName r
+-- | the monorepo branch for a release: f43, frawhide, um43
+releaseBranch :: Distro -> Release -> Text
+releaseBranch d r = distroBranch d <> relName r
 
-terraRepoFor :: Release -> Text
-terraRepoFor r = "https://repos.fyralabs.com/terra" <> relName r
+-- | the distro's repo for a release, e.g. terra43 or umrawhide. subrepos
+-- add a suffix: terra43-extras
+repoName :: Distro -> Release -> Text
+repoName d r = distroRepo d <> relName r
+
+-- | where Fyra Labs' repos are, the same metalink dnf uses. {repo} becomes
+-- a 'repoName', with any subrepo suffix
+defaultRepoUrl :: Text
+defaultRepoUrl = "https://tetsudou.fyralabs.com/metalink?repo={repo}&arch=x86_64"
+
+-- | a repo url template for one release, with {release} filled in and
+-- {repo} left for 'Oglyad.Types.repoUrl'
+repoUrlFor :: Text -> Release -> Text
+repoUrlFor url r = T.replace "{release}" (relName r) url
 
 -- | Fedora's own repos, for the overlap check. rawhide has no updates repo
 fedoraReposFor :: Release -> [Text]
@@ -118,15 +172,15 @@ parseBodhiReleases body = do
 -- "the same way" ignores the dist tag, so build-lag's
 -- "spec is at 1.2-1.fc43" and "spec is at 1.2-1.fc44" merge into
 -- "spec is at 1.2-1%{dist}"
-mergeFindings :: [(Release, [Finding])] -> [Finding]
-mergeFindings perRelease =
+mergeFindings :: Distro -> [(Release, [Finding])] -> [Finding]
+mergeFindings distro perRelease =
   [ merged k f (r : map snd rest)
   | k <- nubOrd (map fst tagged),
     Just ((f, r) : rest) <- [Map.lookup k grouped]
   ]
   where
     tagged = [(keyOf r f, (f, relName r)) | (r, fs) <- perRelease, f <- fs]
-    keyOf r f = (fCheck f, fPackage f, fPath f, fSeverity f, T.replace (releaseDist r) "%{dist}" (fMessage f))
+    keyOf r f = (fCheck f, fPackage f, fPath f, fSeverity f, T.replace (releaseDist distro r) "%{dist}" (fMessage f))
     -- members stay in the order the releases were given
     grouped = Map.fromListWith (flip (<>)) [(k, [x]) | (k, x) <- tagged]
     merged (_, _, _, _, generic) f rels = case nub rels of

@@ -25,7 +25,7 @@ import Oglyad.Release
 import Oglyad.Report (ReleaseInfo (..), Report (..), renderJson, renderMarkdown, renderText)
 import Oglyad.Source.Anda (scriptErrors, stripAnsi)
 import Oglyad.Source.Monorepo (PkgDir (..), checkoutRef, findPackageDirs, hclString, lastCommits, macroFingerprint, specFingerprint, versionMacros)
-import Oglyad.Source.Repodata (RpmEntry (..), decompressAndParse, fetchRepo, latestBySource, parsePrimary, srpmName)
+import Oglyad.Source.Repodata (RpmEntry (..), decompressAndParse, fetchRepo, latestBySource, parseMetalink, parsePrimary, srpmName)
 import Oglyad.Source.Rhai (parseUpdateRhai, parseUpdateRhaiWith)
 import Oglyad.Source.RhaiEval (Simulated (..), simulateVersion)
 import Oglyad.Source.Upstream (isSemver)
@@ -435,7 +435,7 @@ main = hspec $ do
         createDirectoryIfMissing True (root </> "anda/a")
         writeFile (root </> "anda/a/anda.hcl") "project pkg {}"
         createDirectoryLink ".." (root </> "anda/a/loop")
-        dirs <- findPackageDirs root
+        dirs <- findPackageDirs root "anda"
         map (fmap pdPath) dirs `shouldBe` [Right "anda/a"]
         _ <- specFingerprint "m" ".fc44" root "anda/a"
         pure ()
@@ -449,7 +449,7 @@ main = hspec $ do
         pkgDir "n" "nightly"
         pkgDir "q" "quaterdaily"
         pkgDir "w" "weekly"
-        dirs <- findPackageDirs root
+        dirs <- findPackageDirs root "anda"
         [(pdPath d, pdNightly d) | Right d <- dirs] `shouldBe` [("anda/n", True), ("anda/q", True), ("anda/w", False)]
 
   describe "parseCheckName" $ do
@@ -465,6 +465,14 @@ main = hspec $ do
       -- port 9 (discard) on loopback: refused immediately, no network needed
       r <- runApp (snapConfig snapshot) (fetchRepo "http://127.0.0.1:9/repo")
       r `shouldSatisfy` either (const True) (const False)
+    it "turns an unreachable metalink into a Left too" $ do
+      r <- runApp (snapConfig snapshot) (fetchRepo "http://127.0.0.1:9/metalink?repo=terra44")
+      r `shouldSatisfy` either (const True) (const False)
+
+  describe "metalinks"
+    $ it "reads checksums, alternates included, and mirrors by preference"
+    $ parseMetalink metalinkFixture
+      `shouldBe` Right (["aaa", "bbb"], ["https://fast.example/terra44/repodata/repomd.xml", "https://repos.fyralabs.com/terra44/repodata/repomd.xml"])
 
   describe "macroFingerprint" $
     it "changes when ~/.rpmmacros changes" $
@@ -481,9 +489,19 @@ main = hspec $ do
         `shouldBe` [Right (NumberedArg 43), Right (NumberedArg 44), Right RawhideArg, Right RawhideArg, Left "unknown release \"el10\", expected a number like 43, f43, or rawhide", Left "unknown release \"\", expected a number like 43, f43, or rawhide"]
     it "spells rawhide's dist, branch and repos the way Terra does" $ do
       let raw = Release "rawhide" 46
-      (releaseDist raw, releaseBranch raw, terraRepoFor raw, releaseLabel raw) `shouldBe` (".fcrawhide", "frawhide", "https://repos.fyralabs.com/terrarawhide", "rawhide")
+      (releaseDist terra raw, releaseBranch terra raw, repoName terra raw, releaseLabel raw) `shouldBe` (".fcrawhide", "frawhide", "terrarawhide", "rawhide")
       fedoraReposFor raw `shouldBe` ["https://dl.fedoraproject.org/pub/fedora/linux/development/rawhide/Everything/x86_64/os"]
       length (fedoraReposFor (Release "43" 43)) `shouldBe` 2
+    it "spells releases the way Ultramarine does" $ do
+      let r44 = Release "44" 44
+      (releaseDist ultramarine r44, releaseBranch ultramarine r44, repoName ultramarine r44) `shouldBe` (".um44", "um44", "um44")
+      lookupDistro "ultramarine" `shouldBe` Right ultramarine
+      lookupDistro "umbrella" `shouldSatisfy` either (const True) (const False)
+    it "fills in repo url templates, subrepos included" $ do
+      let cfg url = (snapConfig snapshot) {cfgRepoName = "terra44", cfgRepoUrl = repoUrlFor url (Release "44" 44)}
+      repoUrl (cfg defaultRepoUrl) (Just "extras") `shouldBe` "https://tetsudou.fyralabs.com/metalink?repo=terra44-extras&arch=x86_64"
+      repoUrl (cfg "https://example.com/um{release}/x86_64") Nothing `shouldBe` "https://example.com/um44/x86_64"
+      repoUrl (cfg "https://example.com/terra44") (Just "extras") `shouldBe` "https://example.com/terra44-extras"
     it "takes Fedora releases from Bodhi, rawhide last" $
       parseBodhiReleases bodhiFixture `shouldBe` Right [Release "43" 43, Release "44" 44, Release "45" 45, Release "rawhide" 46]
     it "complains when Bodhi lists nothing useful" $
@@ -495,13 +513,16 @@ main = hspec $ do
         lag dist = Finding "build-lag" "zed" (Just "anda/zed") Error ("never published (spec is at 1.2-1" <> dist <> ")") []
         drift = Finding "drift" "zed" (Just "anda/zed") Warn "upstream has 1.3, spec is at 1.2" []
     it "merges findings that only differ by dist" $
-      mergeFindings [(r43, [lag ".fc43"]), (r44, [lag ".fc44"])]
+      mergeFindings terra [(r43, [lag ".fc43"]), (r44, [lag ".fc44"])]
+        `shouldBe` [(lag "%{dist}") {fReleases = ["43", "44"]}]
+    it "merges by the distro's own dist" $
+      mergeFindings ultramarine [(r43, [lag ".um43"]), (r44, [lag ".um44"])]
         `shouldBe` [(lag "%{dist}") {fReleases = ["43", "44"]}]
     it "keeps the real message for a single release" $
-      mergeFindings [(r43, [drift]), (r44, [lag ".fc44"])]
+      mergeFindings terra [(r43, [drift]), (r44, [lag ".fc44"])]
         `shouldBe` [drift {fReleases = ["43"]}, (lag ".fc44") {fReleases = ["44"]}]
     it "tags findings with only the releases that have them" $
-      map fReleases (mergeFindings [(r43, [drift]), (r44, [drift, lag ".fc44"])]) `shouldBe` [["43", "44"], ["44"]]
+      map fReleases (mergeFindings terra [(r43, [drift]), (r44, [drift, lag ".fc44"])]) `shouldBe` [["43", "44"], ["44"]]
 
   describe "release tags in reports" $ do
     let infos = [ReleaseInfo n ("f" <> n) Nothing Nothing "" | n <- ["43", "44"]]
@@ -557,7 +578,7 @@ main = hspec $ do
         git [] ["init", "-q"]
         commitAt "2026-01-02T03:04:05Z" "anda/a"
         commitAt "2026-02-03T04:05:06+08:00" "anda/b"
-        m <- lastCommits repo "HEAD" ["anda/a", "anda/b"]
+        m <- lastCommits repo "anda" "HEAD" ["anda/a", "anda/b"]
         Map.lookup "anda/a" m `shouldBe` Just (UTCTime (fromGregorian 2026 1 2) (3 * 3600 + 4 * 60 + 5))
         Map.lookup "anda/b" m `shouldBe` Just (UTCTime (fromGregorian 2026 2 2) (20 * 3600 + 5 * 60 + 6))
 
@@ -628,9 +649,11 @@ snapshot =
       snapConfig =
         Config
           { cfgMonorepo = ".",
+            cfgRoot = "anda",
             cfgSpecRef = Nothing,
             cfgBranch = "f44",
-            cfgTerraRepo = "",
+            cfgRepoName = "terra44",
+            cfgRepoUrl = defaultRepoUrl,
             cfgFedoraRepos = [],
             cfgRelease = 44,
             cfgDist = ".fc44",
@@ -644,6 +667,17 @@ snapshot =
       snapHead = Nothing,
       snapIgnoreLabels = Map.empty
     }
+
+-- | trimmed from tetsudou's answer for terra44, with a second mirror
+metalinkFixture :: LBS8.ByteString
+metalinkFixture =
+  "<?xml version=\"1.0\" encoding=\"utf-8\"?><metalink version=\"3.0\" xmlns=\"http://www.metalinker.org/\" xmlns:mm0=\"http://fedorahosted.org/mirrormanager\" type=\"dynamic\" generator=\"tetsudou\"><files><file name=\"repomd.xml\">\
+  \<verification><hash type=\"md5\">x</hash><hash type=\"sha256\">aaa</hash></verification>\
+  \<mm0:alternates><mm0:alternate><verification><hash type=\"sha256\">bbb</hash></verification></mm0:alternate></mm0:alternates>\
+  \<resources maxconnections=\"1\">\
+  \<url type=\"https\" protocol=\"https\" location=\"DE\" preference=\"100\">https://repos.fyralabs.com/terra44/repodata/repomd.xml</url>\
+  \<url type=\"https\" protocol=\"https\" location=\"US\" preference=\"200\">https://fast.example/terra44/repodata/repomd.xml</url>\
+  \</resources></file></files></metalink>"
 
 bodhiFixture :: LBS8.ByteString
 bodhiFixture =
@@ -662,6 +696,7 @@ report fs =
     { rVersion = "0",
       rGenerated = now,
       rReleases = [ReleaseInfo "44" "f44" (Just "origin/f44") (Just "abc") "https://repos.fyralabs.com/terra44"],
+      rDistro = "terra",
       rUpstream = False,
       rFindings = fs,
       rIgnored = []

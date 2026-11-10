@@ -1,8 +1,10 @@
--- | reads published dnf repodata: repomd.xml → primary.xml.{zst,gz,xz} → packages
+-- | reads published dnf repodata: metalink → repomd.xml →
+-- primary.xml.{zst,gz,xz} → packages
 module Oglyad.Source.Repodata
   ( RpmEntry (..),
     fetchRepo,
     decompressAndParse,
+    parseMetalink,
     parseRepomd,
     parsePrimary,
     srpmName,
@@ -15,14 +17,19 @@ import Control.DeepSeq (deepseq)
 import Control.Exception (SomeException, try)
 import Control.Monad ((<$!>), (>=>))
 import Control.Monad.Reader (liftIO)
+import Crypto.Hash.SHA256 qualified as SHA256
 import Data.Bifunctor (first)
+import Data.ByteString.Base16 qualified as B16
 import Data.ByteString.Lazy qualified as LBS
 import Data.Char (isAlphaNum)
+import Data.List (sortOn)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (mapMaybe)
+import Data.Ord (Down (..))
 import Data.Text (Text)
 import Data.Text qualified as T
+import Data.Text.Encoding qualified as TE
 import Data.Text.Read qualified as TR
 import Data.Time (UTCTime)
 import Data.Time.Clock.POSIX (posixSecondsToUTCTime)
@@ -37,7 +44,7 @@ import System.Exit (ExitCode (..))
 import System.IO (Handle)
 import System.Process.Typed (byteStringInput, createPipe, getStdout, nullStream, proc, setEnv, setStderr, setStdin, setStdout, waitExitCode, withProcessTerm)
 import Text.XML (Name (..), def, parseLBS)
-import Text.XML.Cursor (attribute, attributeIs, element, fromDocument, ($//), (&/))
+import Text.XML.Cursor (attribute, attributeIs, content, element, fromDocument, ($/), ($//), (&/))
 import Text.XML.Stream.Parse (parseBytes)
 
 -- | one binary (or source) rpm from primary.xml
@@ -53,16 +60,17 @@ data RpmEntry = RpmEntry
   }
   deriving stock (Eq, Show)
 
--- | builds per source package for a repo, reusing the last parse when the
--- repo hasn't changed. repomd.xml is tiny, and the primary.xml href in it
--- embeds a checksum, so an unchanged href means unchanged contents
+-- | builds per source package for a repo, given its metalink or base url,
+-- reusing the last parse when the repo hasn't changed. repomd.xml is tiny,
+-- and the primary.xml href in it embeds a checksum, so an unchanged href
+-- means unchanged contents
 fetchRepo :: Text -> App (Either String (Map Text RepoBuild))
-fetchRepo base = do
-  let file = "repodata-" <> T.unpack (T.map (\c -> if isAlphaNum c then c else '_') base) <> ".json"
-  repomd <- httpGetE (base <> "/repodata/repomd.xml")
-  case first httpErr repomd >>= parseRepomd of
+fetchRepo url = do
+  located <- fetchRepomd url
+  case located >>= \(base, repomd) -> (base,) <$> parseRepomd repomd of
     Left err -> pure (Left err)
-    Right href ->
+    Right (base, href) -> do
+      let file = "repodata-" <> T.unpack (T.map (\c -> if isAlphaNum c then c else '_') base) <> ".json"
       liftIO (loadJson file) >>= \case
         Just (cachedHref, builds) | cachedHref == href -> pure (Right builds)
         _ -> do
@@ -72,6 +80,48 @@ fetchRepo base = do
             Right builds -> liftIO (saveJson file (href, builds))
             Left _ -> pure ()
           pure r
+
+-- | a repo's repomd.xml, and the base url it came from. a url with
+-- "metalink" in it is read like dnf reads one: try its mirrors by
+-- preference, and take the first repomd.xml whose sha256 the metalink
+-- lists, so a mirror that hasn't synced yet is skipped
+fetchRepomd :: Text -> App (Either String (Text, LBS.ByteString))
+fetchRepomd url
+  | "metalink" `T.isInfixOf` url =
+      httpGetE url >>= \r -> case first httpErr r >>= parseMetalink of
+        Left err -> pure (Left ("can't read metalink " <> T.unpack url <> ": " <> err))
+        Right (_, []) -> pure (Left ("metalink " <> T.unpack url <> " lists no mirrors"))
+        Right (hashes, mirrors) -> tryMirrors hashes ("no mirror in " <> T.unpack url) mirrors
+  | otherwise = fmap (url,) . first httpErr <$> httpGetE (url <> "/repodata/repomd.xml")
+  where
+    tryMirrors _ lastErr [] = pure (Left lastErr)
+    tryMirrors hashes _ (m : rest) = case T.stripSuffix "/repodata/repomd.xml" m of
+      Nothing -> tryMirrors hashes ("metalink mirror " <> T.unpack m <> " isn't a repomd.xml") rest
+      Just base ->
+        httpGetE m >>= \case
+          Left e -> tryMirrors hashes (httpErr e) rest
+          Right body
+            | null hashes || sha256 body `elem` hashes -> pure (Right (base, body))
+            | otherwise -> tryMirrors hashes (T.unpack m <> " doesn't match the metalink's checksum, is the mirror behind?") rest
+    sha256 = TE.decodeUtf8 . B16.encode . SHA256.hashlazy
+
+-- | the sha256 hashes a metalink accepts for repomd.xml (the current one and
+-- any alternates, which are recent ones mirrors may still serve), and its
+-- mirrors' repomd.xml urls, most preferred first
+parseMetalink :: LBS.ByteString -> Either String ([Text], [Text])
+parseMetalink bs = do
+  doc <- first show (parseLBS def bs)
+  let cur = fromDocument doc
+      hashes = cur $// (element (metalinkNs "hash") >=> attributeIs "type" "sha256") &/ content
+      urls =
+        [ (pref, T.strip u)
+        | el <- cur $// element (metalinkNs "url"),
+          let pref = case attribute "preference" el of
+                p : _ | Right (n, "") <- TR.decimal p -> n
+                _ -> 0 :: Int,
+          u <- [T.concat (el $/ content)]
+        ]
+  Right (map T.strip hashes, map snd (sortOn (Down . fst) urls))
 
 -- | fetch and parse the primary.xml at a href from repomd.xml
 fetchPrimaryAt :: Text -> Text -> App (Either String [RpmEntry])
@@ -115,10 +165,11 @@ decompressAndParse href compressed
           (ExitSuccess, _) -> parsed
       pure (either (\e -> Left (cmd <> ": " <> show (e :: SomeException))) id r)
 
-repoNs, commonNs, rpmNs :: Text -> Name
+repoNs, commonNs, rpmNs, metalinkNs :: Text -> Name
 repoNs n = Name n (Just "http://linux.duke.edu/metadata/repo") Nothing
 commonNs n = Name n (Just "http://linux.duke.edu/metadata/common") Nothing
 rpmNs n = Name n (Just "http://linux.duke.edu/metadata/rpm") Nothing
+metalinkNs n = Name n (Just "http://www.metalinker.org/") Nothing
 
 -- | find the location of primary.xml in repomd.xml.
 -- this uses the xml-conduit Cursor api, which builds the whole document in
