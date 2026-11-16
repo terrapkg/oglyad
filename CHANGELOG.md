@@ -1,5 +1,9 @@
 # changelog
 
+## 0.1.4.0
+
+- check Bodhi multiple times and cache response
+
 ## 0.1.3.0
 
 - checks Ultramarine-Linux/packages too: `-d`/`--distro ultramarine` reads

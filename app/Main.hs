@@ -4,6 +4,7 @@
 -- is only an Applicative, not a Monad
 module Main (main) where
 
+import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, try)
 import Control.Monad (filterM, forM, unless, when)
 import Data.ByteString qualified as BS
@@ -21,6 +22,7 @@ import Oglyad.Ignore (Applied (..), IgnoreFile (..), applyIgnores, parseIgnoreFi
 import Oglyad.Process (run)
 import Oglyad.Release
 import Oglyad.Report (Format (..), ReleaseInfo (..), Report (..), render)
+import Oglyad.Source.Cache (loadJson, saveJson)
 import Oglyad.Source.Monorepo (pruneTrees)
 import Oglyad.Types
 import Options.Applicative
@@ -128,14 +130,46 @@ resolveReleases mk args
           Right rels | r : _ <- filter isRawhide rels -> pure r
           Right _ -> runError "Bodhi didn't list a rawhide release"
           Left e -> runError ("can't ask Bodhi for rawhide's version: " <> e <> ". pass numbered releases instead")
-    -- runApp wants a config. none of it matters for one http request
-    bodhi = runApp (mk (Release "rawhide" 0)) $ do
-      body <- httpGetE bodhiReleasesUrl
-      pure $ case body of
-        Left (HttpFailed e) -> Left e
-        Left (RateLimited e) -> Left e
-        Right b -> parseBodhiReleases b
+    bodhi = askBodhiPatiently (mk (Release "rawhide" 0))
     runError msg = hPutStrLn stderr ("oglyad: " <> T.unpack msg) >> exitWith exitUsage
+
+bodhiAttempts :: Int
+bodhiAttempts = 4
+
+bodhiCacheFile :: FilePath
+bodhiCacheFile = "bodhi-releases.json"
+
+askBodhiPatiently :: Config -> IO (Either Text [Release])
+askBodhiPatiently cfg = go 1
+  where
+    go attempt =
+      askBodhi cfg >>= \case
+        Right rels -> do
+          now <- getCurrentTime
+          saveJson bodhiCacheFile (now, [(relName r, relVersion r) | r <- rels])
+          pure (Right rels)
+        Left e
+          | attempt < bodhiAttempts -> do
+              let waitSecs = 5 * 2 ^ (attempt - 1)
+              warn ("Bodhi didn't answer (" <> e <> "), trying again in " <> T.pack (show waitSecs) <> "s")
+              threadDelay (waitSecs * 1_000_000)
+              go (attempt + 1)
+          | otherwise -> fallBackToCache e
+    fallBackToCache e =
+      loadJson bodhiCacheFile >>= \case
+        Just (fetched :: UTCTime, rels) -> do
+          warn ("Bodhi didn't answer (" <> e <> "), using its release list from " <> T.pack (show fetched))
+          pure (Right [Release name v | (name, v) <- rels])
+        Nothing -> pure (Left e)
+    warn msg = hPutStrLn stderr ("oglyad: " <> T.unpack msg)
+
+askBodhi :: Config -> IO (Either Text [Release])
+askBodhi cfg = do
+  body <- runApp cfg (httpGetE bodhiReleasesUrl)
+  pure $ case body of
+    Left (HttpFailed e) -> Left e
+    Left (RateLimited e) -> Left e
+    Right b -> parseBodhiReleases b
 
 -- | GITHUB_TOKEN, or whatever the gh cli is logged in with. oglyad itself
 -- only sends it to api.github.com. the one child process that gets it is
