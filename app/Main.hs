@@ -60,11 +60,11 @@ data Opts = Opts
 optsP :: Parser Opts
 optsP = do
   optConfig <- configP
-  optDistro <- optional (option (eitherReader lookupDistro) (long "distro" <> short 'd' <> metavar "NAME" <> help ("which monorepo -m is: " <> distroNames <> ". default: whichever one's package directory (anda/, ultramarine/) the checkout has")))
-  optReleases <- many (option (eitherReader parseReleaseArg) (long "release" <> short 'r' <> metavar "RELEASE" <> help "release to check: 43, f43 or rawhide. repeatable. default: every release Fedora's Bodhi hasn't archived"))
-  optRemote <- strOption (long "remote" <> metavar "NAME" <> value "origin" <> showDefault <> help "git remote whose release branches (f43, frawhide, um43, ...) hold each release's specs. nothing is fetched, run git fetch yourself")
+  optDistro <- optional (option (eitherReader lookupDistro) (long "distro" <> short 'd' <> metavar "NAME" <> help ("which monorepo -m is: " <> distroNames <> ". default: whichever one the checkout looks like (it has anda/, ultramarine/ or tuatara/)")))
+  optReleases <- many (option (eitherReader parseReleaseArg) (long "release" <> short 'r' <> metavar "RELEASE" <> help "release to check: 43, f43 or rawhide, or tumbleweed for openSUSE-based distros. repeatable. default: every release Fedora's Bodhi hasn't archived, or tumbleweed"))
+  optRemote <- strOption (long "remote" <> metavar "NAME" <> value "origin" <> showDefault <> help "git remote whose release branches (f43, frawhide, um43, tumbleweed, ...) hold each release's specs. nothing is fetched, run git fetch yourself")
   optWorktree <- switch (long "worktree" <> help "read specs from the checkout as it is, local edits included, instead of the release branch. needs exactly one --release")
-  optRepo <- optional (strOption (long "repo" <> metavar "URL" <> help ("metalink or base url of the repo to check builds against. {repo} becomes the repo's name (terra43, terra43-extras) and {release} the release's (43, rawhide). a url with neither names one release's repo, so it needs exactly one --release. default: " <> T.unpack defaultRepoUrl)))
+  optRepo <- optional (strOption (long "repo" <> metavar "URL" <> help ("metalink or base url of the repo to check builds against. {repo} becomes the repo's name (terra43, terra43-extras) and {release} the release's (43, rawhide). a url with neither names one release's repo, so it needs exactly one --release. default: " <> T.unpack defaultRepoUrl <> ", or https://repos.fyralabs.com/{repo} for tuatara")))
   optOnly <- many (option (eitherReader parseCheckName) (long "only" <> metavar "CHECK" <> help ("run only this check, repeatable. one of: " <> names)))
   optFormat <-
     option (eitherReader format) (long "format" <> short 'f' <> metavar "FORMAT" <> help "text (default), json, or markdown")
@@ -94,9 +94,9 @@ optsP = do
 
 configP :: Parser (Maybe Text -> Int -> UTCTime -> Maybe Text -> Distro -> Release -> Config)
 configP = do
-  cfgMonorepo <- strOption (long "monorepo" <> short 'm' <> metavar "DIR" <> value "." <> showDefault <> help "checkout of terrapkg/packages, or Ultramarine-Linux/packages with --distro ultramarine")
-  fedora <- switch (long "fedora" <> help "also check for overlap with Fedora's release and updates repos (downloads ~60MB per release)")
-  extraFedora <- many (strOption (long "fedora-repo" <> metavar "URL" <> help "extra repo base url to check for overlap, repeatable"))
+  cfgMonorepo <- strOption (long "monorepo" <> short 'm' <> metavar "DIR" <> value "." <> showDefault <> help "checkout of terrapkg/packages, Ultramarine-Linux/packages or terrapkg/tuatara")
+  base <- switch (long "base" <> long "fedora" <> help "also check for overlap with the base distro's repos: Fedora's release and updates (~60MB per release), or openSUSE Tumbleweed's oss and update")
+  extraBase <- many (strOption (long "base-repo" <> long "fedora-repo" <> metavar "URL" <> help "extra repo base url to check for overlap, repeatable"))
   staleDays <- option auto (long "stale-days" <> metavar "N" <> value (180 :: Int) <> showDefault <> help "builds older than this count as stale")
   cfgUpstream <- switch (long "upstream" <> short 'u' <> help "query upstream APIs for version drift")
   cacheHours <- option auto (long "cache-hours" <> metavar "N" <> value (6 :: Int) <> showDefault <> help "reuse upstream answers younger than this, 0 to always refetch")
@@ -105,33 +105,41 @@ configP = do
     Config
       { cfgRoot = distroRoot distro,
         cfgRepoName = repoName distro rel,
-        cfgRepoUrl = repoUrlFor defaultRepoUrl rel,
-        cfgFedoraRepos = (if fedora then fedoraReposFor rel else []) <> extraFedora,
-        cfgRelease = relVersion rel,
-        cfgDist = releaseDist distro rel,
+        cfgRepoUrl = repoUrlFor (distroRepoUrl distro) rel,
+        cfgSubrepos = distroSubrepos distro,
+        cfgBaseRepos = (if base then baseReposFor (distroBase distro) rel else []) <> extraBase,
+        cfgBaseName = baseName (distroBase distro),
+        cfgMacros = releaseMacros distro rel,
+        cfgCacheTag = releaseCacheTag distro rel,
         cfgBranch = releaseBranch distro rel,
-        cfgRawhide = isRawhide rel,
+        cfgRolling = isRolling rel,
         cfgStaleAfter = fromIntegral (staleDays * 86400),
         cfgCacheFor = fromIntegral (cacheHours * 3600),
         cfgConcurrency = maybe cores id jobs,
         ..
       }
 
--- | turn --release arguments into releases, asking Bodhi for the
--- maintained ones when none were given, and for rawhide's number when
--- rawhide was asked for
-resolveReleases :: (Release -> Config) -> [ReleaseArg] -> IO [Release]
-resolveReleases mk args
-  | null args = bodhi >>= either (\e -> runError ("can't ask Bodhi which releases are maintained: " <> e <> ". pass --release to pick them")) pure
-  | otherwise = nub <$> mapM resolve args
+-- | turn --release arguments into releases. for Fedora-based distros that
+-- means asking Bodhi for the maintained ones when none were given, and for
+-- rawhide's number when rawhide was asked for
+resolveReleases :: Distro -> (Release -> Config) -> [ReleaseArg] -> IO [Release]
+resolveReleases distro mk args = case distroBase distro of
+  OpenSUSE -> nub <$> mapM suse (if null args then [TumbleweedArg] else args)
+  Fedora
+    | null args -> bodhi >>= either (\e -> runError ("can't ask Bodhi which releases are maintained: " <> e <> ". pass --release to pick them")) pure
+    | otherwise -> nub <$> mapM fedora args
   where
-    resolve = \case
+    suse = \case
+      TumbleweedArg -> pure tumbleweed
+      _ -> runError (distroName distro <> " is built on openSUSE, so tumbleweed is its only release")
+    fedora = \case
       NumberedArg n -> pure (Release (T.pack (show n)) n)
       RawhideArg ->
         bodhi >>= \case
-          Right rels | r : _ <- filter isRawhide rels -> pure r
+          Right rels | r : _ <- filter isRolling rels -> pure r
           Right _ -> runError "Bodhi didn't list a rawhide release"
           Left e -> runError ("can't ask Bodhi for rawhide's version: " <> e <> ". pass numbered releases instead")
+      TumbleweedArg -> runError (distroName distro <> " is built on Fedora, so it has no tumbleweed release")
     bodhi = askBodhiPatiently (mk (Release "rawhide" 0))
     runError msg = hPutStrLn stderr ("oglyad: " <> T.unpack msg) >> exitWith exitUsage
 
@@ -201,21 +209,21 @@ parseOpts = do
       (msg, _) -> hPutStrLn stderr msg >> exitWith exitUsage
     other -> handleParseResult other
 
--- | the distro asked for, or the one whose package directory the checkout
+-- | the distro asked for, or the one whose marker directory the checkout
 -- has. a checkout with none, or with more than one, has to say
 pickDistro :: FilePath -> Maybe Distro -> IO Distro
 pickDistro mono asked = do
-  found <- filterM (doesDirectoryExist . (mono </>) . distroRoot) distros
+  found <- filterM (doesDirectoryExist . (mono </>) . distroMarker) distros
   case asked of
     Just d
       | d `elem` found -> pure d
-      | otherwise -> usageError (mono <> " doesn't look like a " <> T.unpack (distroName d) <> " checkout (no " <> distroRoot d <> "/ directory). point -m at one")
+      | otherwise -> usageError (mono <> " doesn't look like a " <> T.unpack (distroName d) <> " checkout (no " <> distroMarker d <> "/ directory). point -m at one")
     Nothing -> case found of
       [d] -> pure d
-      [] -> usageError (mono <> " doesn't look like an anda monorepo (no " <> roots <> " directory). point -m at a checkout of terrapkg/packages or another, see --distro")
-      _ -> usageError (mono <> " has more than one package directory (" <> T.unpack (T.intercalate ", " (map distroName found)) <> "), so pick one with --distro")
+      [] -> usageError (mono <> " doesn't look like an anda monorepo (no " <> markers <> " directory). point -m at a checkout of terrapkg/packages or another, see --distro")
+      _ -> usageError (mono <> " looks like more than one distro (" <> T.unpack (T.intercalate ", " (map distroName found)) <> "), so pick one with --distro")
   where
-    roots = T.unpack (T.intercalate "/, " (map (T.pack . distroRoot) distros)) <> "/"
+    markers = T.unpack (T.intercalate "/, " (map (T.pack . distroMarker) distros)) <> "/"
 
 usageError :: String -> IO a
 usageError msg = hPutStrLn stderr ("oglyad: " <> msg) >> exitWith exitUsage
@@ -249,7 +257,7 @@ main = do
       mkCfg rel =
         let c = optConfig token cores start (specRef rel) distro rel
          in maybe c (\url -> c {cfgRepoUrl = repoUrlFor url rel}) optRepo
-  releases <- resolveReleases mkCfg optReleases
+  releases <- resolveReleases distro mkCfg optReleases
 
   when (cfgUpstream baseCfg && isNothing token) $
     hPutStrLn stderr "oglyad: no GITHUB_TOKEN (or `gh auth token`), GitHub lookups will hit the 60/hour limit fast"

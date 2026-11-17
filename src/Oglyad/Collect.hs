@@ -49,20 +49,22 @@ buildSnapshot = do
   (dirErrs, dirs) <- partitionEithers <$> liftIO (maybe (pure []) (`findPackageDirs` cfgRoot) root)
 
   -- the main repo, every subrepo some package asked for, and Fedora
-  let terraRepos = [(s, repoUrl cfg s) | s <- Nothing : nub (map Just (mapMaybe pdSubrepo dirs))]
+  let subrepos = if cfgSubrepos then nub (map Just (mapMaybe pdSubrepo dirs)) else []
+      terraRepos = [(s, repoUrl cfg s) | s <- Nothing : subrepos]
+      publishedTo p = if cfgSubrepos then pkgSubrepo p else Nothing
   env <- ask
-  ((specErrs, pkgs0), (terra, fedora)) <-
+  ((specErrs, pkgs0), (terra, base)) <-
     liftIO $
       concurrently
         (runReaderT (readPackages (maybe cfgMonorepo id root) logRef hd dirs) env)
-        (runReaderT (fetchRepos terraRepos cfgFedoraRepos) env)
+        (runReaderT (fetchRepos terraRepos cfgBaseRepos) env)
 
   let (repoErrs, repos) = partitionEithers terra
       fetched = Map.fromList repos
       pkgs1 =
         [ p
-            { pkgRepoBuild = Map.lookup (pkgSubrepo p) fetched >>= Map.lookup (pkgName p),
-              pkgRepoChecked = Map.member (pkgSubrepo p) fetched
+            { pkgRepoBuild = Map.lookup (publishedTo p) fetched >>= Map.lookup (pkgName p),
+              pkgRepoChecked = Map.member (publishedTo p) fetched
             }
         | p <- pkgs0
         ]
@@ -72,7 +74,7 @@ buildSnapshot = do
   let snap =
         Snapshot
           { snapPackages = Map.fromList [(pkgPath p, p) | p <- pkgs],
-            snapFedora = foldMap Map.keysSet fedora,
+            snapBase = foldMap Map.keysSet base,
             snapNow = now,
             snapConfig = cfg,
             snapHead = hd,
@@ -94,14 +96,14 @@ upstreamVersions now root pkgs = do
         (runReaderT (maybe (pure ([], id)) (\r -> withAnda r now pkgs) root) env)
   pure (upErrs <> andaErrs, fromAnda . fromApis)
 
--- | every repo at once. Terra failures become findings, Fedora ones just mean
--- no overlap data
+-- | every repo at once. Terra failures become findings, base distro ones
+-- just mean no overlap data
 fetchRepos ::
   [(Maybe Text, Text)] ->
   [Text] ->
   App ([Either Finding (Maybe Text, Map Text RepoBuild)], [Map Text RepoBuild])
-fetchRepos terraRepos fedoraRepos = do
-  let jobs = map Left terraRepos <> map Right fedoraRepos
+fetchRepos terraRepos baseRepos = do
+  let jobs = map Left terraRepos <> map Right baseRepos
   results <- forConcurrentlyN (length jobs) jobs $ \case
     Left (sub, url) -> Left . either (Left . collectErr url . T.pack) (\b -> Right (sub, b)) <$> fetchRepo url
     Right url -> Right . either (const Map.empty) id <$> fetchRepo url
@@ -113,16 +115,16 @@ readPackages :: FilePath -> Text -> Maybe Text -> [PkgDir] -> App ([Finding], [P
 readPackages root0 logRef hd dirs = do
   Config {..} <- asks envConfig
   root <- liftIO (makeAbsolute root0)
-  -- one cache file per dist, so cron jobs checking different releases don't
-  -- keep evicting each other's entries
-  let cacheFile = "specs" <> T.unpack cfgDist <> ".json"
+  -- one cache file per release, so cron jobs checking different releases
+  -- don't keep evicting each other's entries
+  let cacheFile = "specs" <> T.unpack cfgCacheTag <> ".json"
   (commits, (macros, cache)) <-
     liftIO $
       concurrently
-        (commitTimes cfgMonorepo cfgRoot logRef hd cfgDist (map pdPath dirs))
+        (commitTimes cfgMonorepo cfgRoot logRef hd cfgCacheTag (map pdPath dirs))
         ((,) <$> macroFingerprint <*> (fromMaybe Map.empty <$> loadJson cacheFile))
   keyed <- forConcurrentlyN cfgConcurrency dirs $ \d -> liftIO $ do
-    key <- specFingerprint macros cfgDist root (pdPath d)
+    key <- specFingerprint macros cfgMacros root (pdPath d)
     pure (key, d)
   let misses = length [() | (k, _) <- keyed, isNothing (Map.lookup k (cache :: Map Text (Either Text SpecInfo)))]
   note ("evaluating " <> show (length dirs) <> " specs, " <> show (length dirs - misses) <> " unchanged since last run")
@@ -134,7 +136,7 @@ readPackages root0 logRef hd dirs = do
     case (Map.lookup key cache, pdSpec d) of
       (Just cached, _) -> pure (Evaluated key d cached)
       (Nothing, Just spec)
-        | hasRpmspec -> Evaluated key d <$> inSlot (querySpec cfgRelease cfgDist (root </> spec))
+        | hasRpmspec -> Evaluated key d <$> inSlot (querySpec cfgMacros (root </> spec))
         | otherwise -> pure Skipped
       (Nothing, Nothing) -> pure (NoSpec d)
   -- keep only entries for packages that still exist, so the file can't grow forever
@@ -165,10 +167,10 @@ failedForThisHost PkgDir {pdArches} = \case
 
 -- | last commit per package dir, reused as long as the commit hasn't moved.
 -- uncommitted changes can't change any "last commit", so the commit is the
--- whole key. one cache file per dist, since each release reads its own branch
+-- whole key. one cache file per release, since each reads its own branch
 commitTimes :: FilePath -> FilePath -> Text -> Maybe Text -> Text -> [FilePath] -> IO (Map FilePath UTCTime)
-commitTimes mono pkgRoot ref hd dist dirs = do
-  let file = "commits" <> T.unpack dist <> ".json"
+commitTimes mono pkgRoot ref hd tag dirs = do
+  let file = "commits" <> T.unpack tag <> ".json"
   cached <- loadJson file
   case (hd, cached) of
     (Just h, Just (h', m)) | h == h', all (`Map.member` m) dirs -> pure m
@@ -292,9 +294,9 @@ withAnda root now pkgs = do
   let wanted =
         [ p
         | p@Package {pkgUpstream = Just (Unknown _), pkgSpecPath = Just _} <- pkgs,
-          cfgRawhide || pkgUpdBranch p
+          cfgRolling || pkgUpdBranch p
         ]
-      cacheFile = "anda" <> T.unpack cfgDist <> ".json"
+      cacheFile = "anda" <> T.unpack cfgCacheTag <> ".json"
       maxAge = max cfgCacheFor (diffUTCTime now cfgRunStart)
   cache <- liftIO (fromMaybe Map.empty <$> loadJson cacheFile) :: App (Map Text CacheEntry)
   let fresh p = case Map.lookup (pkgFingerprint p) cache of
@@ -323,7 +325,7 @@ withAnda root now pkgs = do
                         Left e -> pure (Left e)
                         Right () ->
                           either (Left . ("rpmspec failed on the updated spec: " <>)) (Right . evrVersion . siEVR)
-                            <$> querySpec cfgRelease cfgDist (copy </> spec)
+                            <$> querySpec cfgMacros (copy </> spec)
                     _ -> pure (Left "anda doesn't list this project")
           pure $ case join' r of
             Left e -> ([(collectErr "anda" e) {fSeverity = Warn}], Map.empty)
