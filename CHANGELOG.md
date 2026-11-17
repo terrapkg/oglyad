@@ -1,7 +1,8 @@
 # changelog
 
-## unreleased
+## 0.1.5.0
 
+- redo comments
 - checks Terra EL too: `-d`/`--distro terra-el` for terrapkg/packages-el,
   picked automatically when the remote's url names packages-el, or
   `-r el10` on a terrapkg/packages checkout until the split is done. specs
