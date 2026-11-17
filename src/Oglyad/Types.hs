@@ -163,19 +163,21 @@ data Config = Config
     -- | the monorepo branch name, f43 or frawhide. update.rhai
     -- scripts see it as labels.branch
     cfgBranch :: Text,
-    cfgRawhide :: Bool,
+    cfgRolling :: Bool,
     -- | the main repo's name, e.g. terra44
     cfgRepoName :: Text,
     -- | where it is: a metalink or a base url, with {repo} where the repo
     -- name goes. without {repo} it's the main repo's url, and subrepos add
     -- -extras to the end of it
     cfgRepoUrl :: Text,
+    cfgSubrepos :: Bool,
     -- | repo base urls to check for overlap
-    cfgFedoraRepos :: [Text],
-    -- | Fedora/Terra release number, e.g. 44. rawhide has one too
-    cfgRelease :: Int,
-    -- | %{dist} used when evaluating specs, e.g. .fc44, .fcrawhide or .um44
-    cfgDist :: Text,
+    cfgBaseRepos :: [Text],
+    cfgBaseName :: Text,
+    -- | macros defined (Just) or undefined (Nothing) when evaluating specs,
+    -- e.g. dist .fc44 and fedora 44
+    cfgMacros :: [(Text, Maybe Text)],
+    cfgCacheTag :: Text,
     cfgStaleAfter :: NominalDiffTime,
     -- | whether to hit upstream APIs at all
     cfgUpstream :: Bool,
@@ -204,8 +206,8 @@ repoUrl Config {..} sub
 data Snapshot = Snapshot
   { -- | keyed by monorepo path, since names can repeat
     snapPackages :: Map FilePath Package,
-    -- | source package names present in Fedora
-    snapFedora :: Set Text,
+    -- | source package names present in the base distro
+    snapBase :: Set Text,
     snapNow :: UTCTime,
     snapConfig :: Config,
     -- | the monorepo commit this run looked at

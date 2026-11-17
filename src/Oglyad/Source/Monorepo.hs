@@ -87,7 +87,7 @@ findPackageDirs root pkgRoot = go pkgRoot
         Left (e :: IOException) -> pure [Left (rel, T.pack (show e))]
         Right entries -> do
           hasHcl <- doesFileExist (abs' </> "anda.hcl")
-          here <- if hasHcl then pure <$> readPkgDir rel entries else pure []
+          here <- if hasHcl && not (null rel) then pure <$> readPkgDir rel entries else pure []
           subdirs <- filterM (realDir . (abs' </>)) [e | e <- sort entries, take 1 e /= "."]
           nested <- concat <$> forM subdirs (go . (rel </>))
           pure (here <> nested)
@@ -180,31 +180,30 @@ readText path = TE.decodeUtf8Lenient <$> BS.readFile path
 
 -- | let rpm evaluate the spec for us. hand-parsing specs means reimplementing
 -- the macro engine, which is a terrible idea
-querySpec :: Int -> Text -> FilePath -> IO (Either Text SpecInfo)
-querySpec release dist spec = do
+querySpec :: [(Text, Maybe Text)] -> FilePath -> IO (Either Text SpecInfo)
+querySpec macros spec = do
   let qf = "%{NAME}\t%|EPOCH?{%{EPOCH}}:{0}|:%{VERSION}-%{RELEASE}\n"
   out <-
     run "rpmspec" $
-      [ "-q",
-        "--srpm",
-        "--define",
-        "dist " <> T.unpack dist,
-        -- %fedora comes from the host otherwise, so -r 43 on an F44 box would
-        -- take the wrong side of every %if 0%{?fedora} >= 44
-        "--define",
-        "fedora " <> show release,
-        -- some specs load macro files from their own dir via %{_sourcedir}
-        "--define",
-        "_sourcedir " <> takeDirectory spec,
-        "--qf",
-        qf,
-        spec
-      ]
+      ["-q", "--srpm"]
+        <> concatMap macroArgs macros
+        <> [ -- some specs load macro files from their own dir via %{_sourcedir}
+             "--define",
+             "_sourcedir " <> takeDirectory spec,
+             "--qf",
+             qf,
+             spec
+           ]
   pure $ do
     o <- out
     case T.splitOn "\t" <$> take 1 (T.lines o) of
       [[name, evr]] | Just e <- parseEVR evr -> Right (SpecInfo name e)
       _ -> Left ("unexpected rpmspec output: " <> o)
+
+macroArgs :: (Text, Maybe Text) -> [String]
+macroArgs = \case
+  (name, Just body) -> ["--define", T.unpack name <> " " <> T.unpack body]
+  (name, Nothing) -> ["--undefine", T.unpack name]
 
 -- | time of the last commit touching each package dir, from a single
 -- `git log` over the whole history.
@@ -218,7 +217,7 @@ lastCommits :: FilePath -> FilePath -> Text -> [FilePath] -> IO (Map FilePath UT
 lastCommits root pkgRoot ref dirs = do
   out <-
     run "git" $
-      ["-C", root, "-c", "core.quotePath=false", "log", "--format=@%ct", "--name-only", "--no-renames", T.unpack ref, "--", pkgRoot]
+      ["-C", root, "-c", "core.quotePath=false", "log", "--format=@%ct", "--name-only", "--no-renames", T.unpack ref, "--", if null pkgRoot then "." else pkgRoot]
   -- not a git checkout (or no git at all) just means no commit times
   pure (either (const Map.empty) (go Nothing Map.empty . T.lines) out)
   where
@@ -316,12 +315,12 @@ pruneTrees keep = do
 
 -- | a hash of everything that can change what rpmspec says about a package:
 -- the files in its directory and any subdirectories like patches/ (but not
--- nested packages, which have their own fingerprint), the dist tag, and the
--- rpm macros in effect (see 'macroFingerprint')
-specFingerprint :: Text -> Text -> FilePath -> FilePath -> IO Text
-specFingerprint macros dist root rel = do
+-- nested packages, which have their own fingerprint), the macros defined for
+-- the release, and the rpm macros in effect (see 'macroFingerprint')
+specFingerprint :: Text -> [(Text, Maybe Text)] -> FilePath -> FilePath -> IO Text
+specFingerprint macros defines root rel = do
   files <- packageFiles (root </> rel)
-  let header = TE.encodeUtf8 (macros <> "\0" <> dist <> "\0" <> T.pack rel <> "\0")
+  let header = TE.encodeUtf8 (macros <> "\0" <> T.pack (show defines) <> "\0" <> T.pack rel <> "\0")
   -- feed each file to the hash as its own chunk instead of concatenating
   -- them, which would copy every byte of the package dir once more
   ctx <-

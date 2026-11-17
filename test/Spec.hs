@@ -299,7 +299,7 @@ main = hspec $ do
       map fCheck (UnparsedRhai.check snapshot unknown) `shouldBe` ["unparsed-rhai"]
       UnparsedRhai.check snapshot unknown {pkgUpstreamVer = Just "1.3.0"} `shouldBe` []
     it "only reports scripts without updbranch on rawhide" $ do
-      let rawhide = snapshot {snapConfig = (snapConfig snapshot) {cfgRawhide = True}}
+      let rawhide = snapshot {snapConfig = (snapConfig snapshot) {cfgRolling = True}}
       UnparsedRhai.check snapshot unknown {pkgUpdBranch = False} `shouldBe` []
       map fCheck (UnparsedRhai.check rawhide unknown {pkgUpdBranch = False}) `shouldBe` ["unparsed-rhai"]
 
@@ -338,9 +338,12 @@ main = hspec $ do
     $ severities (UnparsedRhai.check snapshot (pkg {pkgRhai = Just "let v = gh_tag(\"a/b\"));\nrpm.version(v);"})) `shouldBe` [Warn]
 
   describe "fedora-overlap check" $ do
-    let withFedora = snapshot {snapFedora = Set.singleton "zed"}
+    let withFedora = snapshot {snapBase = Set.singleton "zed"}
     it "warns when Fedora ships the same package" $
       severities (FedoraOverlap.check withFedora pkg) `shouldBe` [Warn]
+    it "names the base distro it overlaps with" $ do
+      let suse = withFedora {snapConfig = (snapConfig withFedora) {cfgBaseName = "openSUSE"}}
+      map fMessage (FedoraOverlap.check suse pkg) `shouldBe` ["also shipped by openSUSE"]
     it "ignores packages in subrepos" $
       FedoraOverlap.check withFedora (pkg {pkgSubrepo = Just "multimedia"}) `shouldBe` []
     it "is quiet when Fedora doesn't have it" $
@@ -435,7 +438,7 @@ main = hspec $ do
         createDirectoryIfMissing True (root </> "anda/a")
         writeFile (root </> "anda/a/a.spec") "Name: a"
         createFileLink "does-not-exist" (root </> "anda/a/broken")
-        key <- specFingerprint "m" ".fc44" root "anda/a"
+        key <- specFingerprint "m" [("dist", Just ".fc44")] root "anda/a"
         T.length key `shouldBe` 64
     it "doesn't follow a symlink loop" $
       withSystemTempDirectory "oglyad-loop" $ \root -> do
@@ -444,8 +447,16 @@ main = hspec $ do
         createDirectoryLink ".." (root </> "anda/a/loop")
         dirs <- findPackageDirs root "anda"
         map (fmap pdPath) dirs `shouldBe` [Right "anda/a"]
-        _ <- specFingerprint "m" ".fc44" root "anda/a"
+        _ <- specFingerprint "m" [("dist", Just ".fc44")] root "anda/a"
         pure ()
+
+    it "walks packages at the top of the checkout, skipping the monorepo's own anda.hcl" $
+      withSystemTempDirectory "oglyad-top" $ \root -> do
+        writeFile (root </> "anda.hcl") "config {}\nproject {}"
+        createDirectoryIfMissing True (root </> "devs/a")
+        writeFile (root </> "devs/a/anda.hcl") "project pkg {}"
+        dirs <- findPackageDirs root ""
+        map (fmap pdPath) dirs `shouldBe` [Right "devs/a"]
 
   describe "nightly labels" $
     it "treats nightly and quaterdaily as branch-head builds, not weekly" $
@@ -492,18 +503,29 @@ main = hspec $ do
 
   describe "releases" $ do
     it "parses --release spellings" $
-      map parseReleaseArg ["43", "f44", "rawhide", "frawhide", "el10", ""]
-        `shouldBe` [Right (NumberedArg 43), Right (NumberedArg 44), Right RawhideArg, Right RawhideArg, Left "unknown release \"el10\", expected a number like 43, f43, or rawhide", Left "unknown release \"\", expected a number like 43, f43, or rawhide"]
+      map parseReleaseArg ["43", "f44", "rawhide", "frawhide", "tumbleweed", "tw", "el10", ""]
+        `shouldBe` [Right (NumberedArg 43), Right (NumberedArg 44), Right RawhideArg, Right RawhideArg, Right TumbleweedArg, Right TumbleweedArg, Left "unknown release \"el10\", expected a number like 43, f43, rawhide, or tumbleweed", Left "unknown release \"\", expected a number like 43, f43, rawhide, or tumbleweed"]
     it "spells rawhide's dist, branch and repos the way Terra does" $ do
       let raw = Release "rawhide" 46
       (releaseDist terra raw, releaseBranch terra raw, repoName terra raw, releaseLabel raw) `shouldBe` (".fcrawhide", "frawhide", "terrarawhide", "rawhide")
-      fedoraReposFor raw `shouldBe` ["https://dl.fedoraproject.org/pub/fedora/linux/development/rawhide/Everything/x86_64/os"]
-      length (fedoraReposFor (Release "43" 43)) `shouldBe` 2
+      baseReposFor Fedora raw `shouldBe` ["https://dl.fedoraproject.org/pub/fedora/linux/development/rawhide/Everything/x86_64/os"]
+      length (baseReposFor Fedora (Release "43" 43)) `shouldBe` 2
+      releaseMacros terra raw `shouldBe` [("dist", Just ".fcrawhide"), ("fedora", Just "46")]
     it "spells releases the way Ultramarine does" $ do
       let r44 = Release "44" 44
       (releaseDist ultramarine r44, releaseBranch ultramarine r44, repoName ultramarine r44) `shouldBe` (".um44", "um44", "um44")
       lookupDistro "ultramarine" `shouldBe` Right ultramarine
       lookupDistro "umbrella" `shouldSatisfy` either (const True) (const False)
+    it "spells tumbleweed the way Tuatara does" $ do
+      (releaseDist tuatara tumbleweed, releaseBranch tuatara tumbleweed, repoName tuatara tumbleweed, releaseLabel tumbleweed)
+        `shouldBe` ("", "tumbleweed", "tuatara-tumbleweed", "tumbleweed")
+      isRolling tumbleweed `shouldBe` True
+      releaseMacros tuatara tumbleweed `shouldBe` [("dist", Nothing), ("fedora", Nothing), ("suse_version", Just "1699"), ("is_opensuse", Just "1")]
+      repoUrlFor (distroRepoUrl tuatara) tumbleweed `shouldBe` "https://repos.fyralabs.com/{repo}"
+      baseReposFor OpenSUSE tumbleweed `shouldBe` ["https://download.opensuse.org/tumbleweed/repo/oss", "https://download.opensuse.org/update/tumbleweed"]
+      lookupDistro "tuatara" `shouldBe` Right tuatara
+    it "keeps cache tags apart across distros" $
+      releaseCacheTag terra (Release "rawhide" 46) `shouldNotBe` releaseCacheTag ultramarine (Release "rawhide" 46)
     it "fills in repo url templates, subrepos included" $ do
       let cfg url = (snapConfig snapshot) {cfgRepoName = "terra44", cfgRepoUrl = repoUrlFor url (Release "44" 44)}
       repoUrl (cfg defaultRepoUrl) (Just "extras") `shouldBe` "https://tetsudou.fyralabs.com/metalink?repo=terra44-extras&arch=x86_64"
@@ -525,6 +547,9 @@ main = hspec $ do
     it "merges by the distro's own dist" $
       mergeFindings ultramarine [(r43, [lag ".um43"]), (r44, [lag ".um44"])]
         `shouldBe` [(lag "%{dist}") {fReleases = ["43", "44"]}]
+    it "leaves messages alone when the distro has no dist tag" $
+      mergeFindings tuatara [(tumbleweed, [lag "", drift])]
+        `shouldBe` [(lag "") {fReleases = ["tumbleweed"]}, drift {fReleases = ["tumbleweed"]}]
     it "keeps the real message for a single release" $
       mergeFindings terra [(r43, [drift]), (r44, [lag ".fc44"])]
         `shouldBe` [drift {fReleases = ["43"]}, (lag ".fc44") {fReleases = ["44"]}]
@@ -652,7 +677,7 @@ snapshot :: Snapshot
 snapshot =
   Snapshot
     { snapPackages = Map.singleton (pkgPath pkg) pkg,
-      snapFedora = Set.empty,
+      snapBase = Set.empty,
       snapNow = now,
       snapConfig =
         Config
@@ -660,12 +685,14 @@ snapshot =
             cfgRoot = "anda",
             cfgSpecRef = Nothing,
             cfgBranch = "f44",
-            cfgRawhide = False,
+            cfgRolling = False,
             cfgRepoName = "terra44",
             cfgRepoUrl = defaultRepoUrl,
-            cfgFedoraRepos = [],
-            cfgRelease = 44,
-            cfgDist = ".fc44",
+            cfgSubrepos = True,
+            cfgBaseRepos = [],
+            cfgBaseName = "Fedora",
+            cfgMacros = [("dist", Just ".fc44"), ("fedora", Just "44")],
+            cfgCacheTag = "-terra-44",
             cfgStaleAfter = 180 * nominalDay,
             cfgUpstream = False,
             cfgCacheFor = 0,

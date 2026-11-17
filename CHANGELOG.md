@@ -2,6 +2,15 @@
 
 ## unreleased
 
+- checks terrapkg/tuatara too: `-d`/`--distro tuatara`, or picked
+  automatically from a checkout with a `tuatara/` directory. its one
+  release is `tumbleweed`, specs see openSUSE's macros instead of Fedora's,
+  and builds are read from `tuatara-tumbleweed` on repos.fyralabs.com
+- `--fedora` and `--fedora-repo` are now `--base` and `--base-repo`, since
+  the overlap check uses whichever distro the monorepo builds on. the old
+  names still work
+- cache files are named per distro and release instead of per dist tag, so
+  the first run after upgrading reevaluates every spec
 - releases are checked in parallel instead of one after another. a cold run
   over f43, f44, f45 and rawhide went from about 4 minutes to 1.5. progress
   messages say which release they're about when checking more than one

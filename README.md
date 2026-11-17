@@ -8,11 +8,12 @@ git clone https://github.com/terrapkg/packages ../packages
 oglyad -m ../packages            # warnings and errors, every maintained release
 oglyad -m ../packages -v         # plus info findings
 oglyad -m ../packages -u         # plus upstream version drift
-oglyad -m ../packages --fedora   # plus overlap with Fedora
+oglyad -m ../packages --base     # plus overlap with Fedora (or openSUSE)
 oglyad -m ../packages -r 44 -r rawhide   # just these releases
 oglyad -m ../packages -r rawhide --worktree   # your local edits, against rawhide
 oglyad -m ../packages --only drift --format json
 oglyad -m ../um-packages          # Ultramarine-Linux/packages works too
+oglyad -m ../tuatara              # so does terrapkg/tuatara, on openSUSE
 ```
 
 from a checkout, `cabal run oglyad -- <args>` and `cabal test`. it needs
@@ -41,16 +42,25 @@ and needs exactly one `--release`.
 ## distros and repos
 
 oglyad checks any anda monorepo it knows the layout of. `-d`/`--distro`
-picks one, and by default it's whichever one's package directory the
-checkout has:
+picks one, and by default it's whichever one the checkout looks like (it
+has `anda/`, `ultramarine/` or `tuatara/`):
 
-| distro        | monorepo                   | packages in    | branches            | repos                       | dist                  |
-| ------------- | -------------------------- | -------------- | ------------------- | --------------------------- | --------------------- |
-| `terra`       | terrapkg/packages          | `anda/`        | `f43`, `frawhide`   | `terra43`, `terra43-extras` | `.fc43`, `.fcrawhide` |
-| `ultramarine` | Ultramarine-Linux/packages | `ultramarine/` | `um43`, `umrawhide` | `um43`                      | `.um43`, `.umrawhide` |
+| distro        | base     | monorepo                   | packages in    | branches            | repos                       | dist                  |
+| ------------- | -------- | -------------------------- | -------------- | ------------------- | --------------------------- | --------------------- |
+| `terra`       | Fedora   | terrapkg/packages          | `anda/`        | `f43`, `frawhide`   | `terra43`, `terra43-extras` | `.fc43`, `.fcrawhide` |
+| `ultramarine` | Fedora   | Ultramarine-Linux/packages | `ultramarine/` | `um43`, `umrawhide` | `um43`                      | `.um43`, `.umrawhide` |
+| `tuatara`     | openSUSE | terrapkg/tuatara           | the top level  | `tumbleweed`        | `tuatara-tumbleweed`        | none                  |
+
+Tuatara only builds for Tumbleweed, so that's the one release it has
+(`-r tumbleweed`, or `tw`), and Bodhi isn't asked. its specs are evaluated
+with `%suse_version` 1699 and `%is_opensuse` 1, and with `%fedora` and
+`%dist` undefined, like on a Tumbleweed builder. subrepo labels don't get
+their own repo there, since every build lands in `tuatara-tumbleweed`.
 
 builds are looked up through the same metalink dnf uses,
-`https://tetsudou.fyralabs.com/metalink?repo={repo}&arch=x86_64`. oglyad
+`https://tetsudou.fyralabs.com/metalink?repo={repo}&arch=x86_64`, except
+for Tuatara, which tetsudou has no mirrors for, so it's read straight from
+`https://repos.fyralabs.com/{repo}`. oglyad
 tries its mirrors by preference and takes the first repomd.xml whose sha256
 the metalink lists, so a mirror that hasn't synced yet is skipped.
 
@@ -141,7 +151,7 @@ reported as `unused-ignore`, so exceptions don't outlive their reason. `--no-ign
 | `duplicate-name` | warn                                     | two directories build the same package name into the same repo, so they overwrite each other                                                                                                                                                                                                   |
 | `stale`          | info, warn with `-u`                     | last build is older than `--stale-days`, warn if upstream also moved on                                                                                                                                                                                                                        |
 | `upstream-error` | warn                                     | the upstream from update.rhai 404s or fails, so `anda update` is failing too                                                                                                                                                                                                                   |
-| `fedora-overlap` | warn                                     | Fedora ships the same source package (`--fedora`). subrepos are exempt                                                                                                                                                                                                                         |
+| `fedora-overlap` | warn                                     | the base distro ships the same source package (`--base`, or `--fedora`): Fedora's release and updates repos, or Tumbleweed's oss and update repos for Tuatara. subrepos are exempt                                                                                                            |
 | `no-autoupdate`  | info                                     | no update.rhai, or one with only comments in it                                                                                                                                                                                                                                                |
 | `unparsed-rhai`  | info, warn when anda can't run it either | update.rhai looks a version up in a way oglyad can't follow, like custom scraping, and anda didn't answer for it (no `-u`, or anda isn't installed). scripts that only bump Release, track a commit, or copy Version from another spec aren't listed                                           |
 | `collect`        | error                                    | rpmspec failed, a repo couldn't be fetched, or an upstream rate-limited us (warn)                                                                                                                                                                                                              |
@@ -167,7 +177,7 @@ upstream ones.
  ┌──────────── IO shell (Collect) ──┐      ┌──── pure core ────┐     ┌─ IO ─┐
  monorepo: rpmspec, git ──┐
  Terra repodata + subrepos├─► Snapshot ───► [Check] ─► [Finding] ─► Report
- Fedora repodata ─────────┤
+ Fedora/SUSE repodata ────┤
  upstream APIs ───────────┘
 ```
 
