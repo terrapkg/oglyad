@@ -290,11 +290,15 @@ main = hspec $ do
     it "strips color codes" $
       stripAnsi "   0: \ESC[91mProject not found: x\ESC[0m" `shouldBe` "   0: Project not found: x"
 
-  describe "unparsed-rhai with anda" $
+  describe "unparsed-rhai with anda" $ do
+    let unknown = pkg {pkgUpstream = Just (Unknown "let x = get(\"u\");"), pkgUpdBranch = True}
     it "stays quiet once anda answered for the script" $ do
-      let unknown = pkg {pkgUpstream = Just (Unknown "let x = get(\"u\");")}
       map fCheck (UnparsedRhai.check snapshot unknown) `shouldBe` ["unparsed-rhai"]
       UnparsedRhai.check snapshot unknown {pkgUpstreamVer = Just "1.3.0"} `shouldBe` []
+    it "only reports scripts without updbranch on rawhide" $ do
+      let rawhide = snapshot {snapConfig = (snapConfig snapshot) {cfgRawhide = True}}
+      UnparsedRhai.check snapshot unknown {pkgUpdBranch = False} `shouldBe` []
+      map fCheck (UnparsedRhai.check rawhide unknown {pkgUpdBranch = False}) `shouldBe` ["unparsed-rhai"]
 
   describe "versionMacros" $ do
     it "finds %name, %{name} and %{?name}" $

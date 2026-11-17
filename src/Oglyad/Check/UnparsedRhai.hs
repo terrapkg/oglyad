@@ -8,10 +8,11 @@ import Oglyad.Source.Rhai (balanced, tokenize)
 import Oglyad.Types
 
 check :: Check
-check _ p@Package {..} =
+check Snapshot {snapConfig} p@Package {..} =
   broken <> case pkgUpstream of
     -- anda ran it for us, so there's an answer (or an upstream-error)
     Just (Unknown _) | isJust pkgUpstreamVer || isJust pkgUpstreamErr -> []
+    Just (Unknown _) | not (cfgRawhide snapConfig || pkgUpdBranch) -> []
     Just (Unknown raw) ->
       [finding "unparsed-rhai" p Info ("can't parse update.rhai: " <> T.take 80 (head' (T.lines raw)))]
     _ -> []

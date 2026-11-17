@@ -1,5 +1,20 @@
 # changelog
 
+## unreleased
+
+- releases are checked in parallel instead of one after another. a cold run
+  over f43, f44, f45 and rawhide went from about 4 minutes to 1.5. progress
+  messages say which release they're about when checking more than one
+- update.rhai scripts without an `updbranch` label only run under anda on
+  rawhide, like Terra's update workflows, which update rawhide and copy the
+  result to the release branches. `unparsed-rhai` only reports them on
+  rawhide too
+- upstream lookups and anda runs happen at the same time
+- an upstream that several releases ask about is looked up once, even when
+  the lookup fails
+- rpmspec and anda share one pool of `--jobs` slots across all releases
+- the missing `GITHUB_TOKEN` warning is printed once per run
+
 ## 0.1.4.0
 
 - check Bodhi multiple times and cache response
