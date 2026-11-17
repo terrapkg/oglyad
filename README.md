@@ -8,9 +8,11 @@ git clone https://github.com/terrapkg/packages ../packages
 oglyad -m ../packages            # warnings and errors, every maintained release
 oglyad -m ../packages -v         # plus info findings
 oglyad -m ../packages -u         # plus upstream version drift
-oglyad -m ../packages --base     # plus overlap with Fedora (or openSUSE)
+oglyad -m ../packages --base     # plus overlap with Fedora (or EL, or openSUSE)
 oglyad -m ../packages -r 44 -r rawhide   # just these releases
 oglyad -m ../packages -r rawhide --worktree   # your local edits, against rawhide
+oglyad -m ../packages-el          # Terra EL, from terrapkg/packages-el
+oglyad -m ../packages -r el10     # or from packages' el10 branch, until the split is done
 oglyad -m ../packages --only drift --format json
 oglyad -m ../um-packages          # Ultramarine-Linux/packages works too
 oglyad -m ../tuatara              # so does terrapkg/tuatara, on openSUSE
@@ -26,7 +28,7 @@ by default oglyad checks every Fedora release
 [Bodhi](https://bodhi.fedoraproject.org/releases/) hasn't archived (the
 current ones, a branched one before its release, and rawhide), so branching
 and EOL need no changes here. `-r`/`--release` picks releases instead, as
-`43`, `f43` or `rawhide`, and can be repeated.
+`43`, `f43`, `rawhide` or `el10`, and can be repeated.
 
 each release is checked against its own Terra repo (`terra43`,
 `terrarawhide`) and its own branch of terrapkg/packages (`origin/f43`,
@@ -43,11 +45,16 @@ and needs exactly one `--release`.
 
 oglyad checks any anda monorepo it knows the layout of. `-d`/`--distro`
 picks one, and by default it's whichever one the checkout looks like (it
-has `anda/`, `ultramarine/` or `tuatara/`):
+has `anda/`, `ultramarine/` or `tuatara/`). terrapkg/packages and
+packages-el both have `anda/`, so those two are told apart by the repo name
+in the remote's url (`--remote`, `origin` by default). a fork with another
+name needs `--distro`:
 
 | distro        | base     | monorepo                   | packages in    | branches            | repos                       | dist                  |
 | ------------- | -------- | -------------------------- | -------------- | ------------------- | --------------------------- | --------------------- |
 | `terra`       | Fedora   | terrapkg/packages          | `anda/`        | `f43`, `frawhide`   | `terra43`, `terra43-extras` | `.fc43`, `.fcrawhide` |
+| `terra`       | EL       | terrapkg/packages          | `anda/`        | `el10`              | `terrael10`                 | `.el10`               |
+| `terra-el`    | EL       | terrapkg/packages-el       | `anda/`        | `el10`              | `terrael10`                 | `.el10`               |
 | `ultramarine` | Fedora   | Ultramarine-Linux/packages | `ultramarine/` | `um43`, `umrawhide` | `um43`                      | `.um43`, `.umrawhide` |
 | `tuatara`     | openSUSE | terrapkg/tuatara           | the top level  | `tumbleweed`        | `tuatara-tumbleweed`        | none                  |
 
@@ -56,6 +63,15 @@ Tuatara only builds for Tumbleweed, so that's the one release it has
 with `%suse_version` 1699 and `%is_opensuse` 1, and with `%fedora` and
 `%dist` undefined, like on a Tumbleweed builder. subrepo labels don't get
 their own repo there, since every build lands in `tuatara-tumbleweed`.
+
+Terra EL is moving from terrapkg/packages' `el10` branch to
+terrapkg/packages-el. a packages-el checkout checks every `elN` branch the
+remote has by default (Bodhi lists EPEL releases Terra doesn't build, so
+it isn't asked). a packages checkout only checks EL with `-r el10`. specs are evaluated with `%rhel` and `%epel`
+10, `%el10` 1, `%dist` `.el10` and `%fedora` undefined, like on Terra's EL
+builder. every EL build lands in `terrael10`, so subrepo labels don't get
+their own repo, and `--base` checks overlap with AlmaLinux's BaseOS,
+AppStream, CRB and extras repos plus EPEL.
 
 builds are looked up through the same metalink dnf uses,
 `https://tetsudou.fyralabs.com/metalink?repo={repo}&arch=x86_64`, except
@@ -151,7 +167,7 @@ reported as `unused-ignore`, so exceptions don't outlive their reason. `--no-ign
 | `duplicate-name` | warn                                     | two directories build the same package name into the same repo, so they overwrite each other                                                                                                                                                                                                   |
 | `stale`          | info, warn with `-u`                     | last build is older than `--stale-days`, warn if upstream also moved on                                                                                                                                                                                                                        |
 | `upstream-error` | warn                                     | the upstream from update.rhai 404s or fails, so `anda update` is failing too                                                                                                                                                                                                                   |
-| `fedora-overlap` | warn                                     | the base distro ships the same source package (`--base`, or `--fedora`): Fedora's release and updates repos, or Tumbleweed's oss and update repos for Tuatara. subrepos are exempt                                                                                                            |
+| `fedora-overlap` | warn                                     | the base distro ships the same source package (`--base`, or `--fedora`): Fedora's release and updates repos, AlmaLinux and EPEL for `el10`, or Tumbleweed's oss and update repos for Tuatara. subrepos are exempt                                                                                                            |
 | `no-autoupdate`  | info                                     | no update.rhai, or one with only comments in it                                                                                                                                                                                                                                                |
 | `unparsed-rhai`  | info, warn when anda can't run it either | update.rhai looks a version up in a way oglyad can't follow, like custom scraping, and anda didn't answer for it (no `-u`, or anda isn't installed). scripts that only bump Release, track a commit, or copy Version from another spec aren't listed                                           |
 | `collect`        | error                                    | rpmspec failed, a repo couldn't be fetched, or an upstream rate-limited us (warn)                                                                                                                                                                                                              |

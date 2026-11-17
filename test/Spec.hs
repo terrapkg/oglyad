@@ -502,17 +502,18 @@ main = hspec $ do
           fpAfter `shouldNotBe` fpBefore
 
   describe "releases" $ do
-    it "parses --release spellings" $
-      map parseReleaseArg ["43", "f44", "rawhide", "frawhide", "tumbleweed", "tw", "el10", ""]
-        `shouldBe` [Right (NumberedArg 43), Right (NumberedArg 44), Right RawhideArg, Right RawhideArg, Right TumbleweedArg, Right TumbleweedArg, Left "unknown release \"el10\", expected a number like 43, f43, rawhide, or tumbleweed", Left "unknown release \"\", expected a number like 43, f43, rawhide, or tumbleweed"]
+    it "parses --release spellings" $ do
+      let unknown raw = Left ("unknown release " <> show (raw :: String) <> ", expected a number like 43, f43, rawhide, tumbleweed, or el10")
+      map parseReleaseArg ["43", "f44", "rawhide", "frawhide", "tumbleweed", "tw", "el10", "el", "epel10", ""]
+        `shouldBe` [Right (NumberedArg 43), Right (NumberedArg 44), Right RawhideArg, Right RawhideArg, Right TumbleweedArg, Right TumbleweedArg, Right (ElArg 10), unknown "el", unknown "epel10", unknown ""]
     it "spells rawhide's dist, branch and repos the way Terra does" $ do
-      let raw = Release "rawhide" 46
+      let raw = Release Fedora "rawhide" 46
       (releaseDist terra raw, releaseBranch terra raw, repoName terra raw, releaseLabel raw) `shouldBe` (".fcrawhide", "frawhide", "terrarawhide", "rawhide")
-      baseReposFor Fedora raw `shouldBe` ["https://dl.fedoraproject.org/pub/fedora/linux/development/rawhide/Everything/x86_64/os"]
-      length (baseReposFor Fedora (Release "43" 43)) `shouldBe` 2
+      baseReposFor raw `shouldBe` ["https://dl.fedoraproject.org/pub/fedora/linux/development/rawhide/Everything/x86_64/os"]
+      length (baseReposFor (Release Fedora "43" 43)) `shouldBe` 2
       releaseMacros terra raw `shouldBe` [("dist", Just ".fcrawhide"), ("fedora", Just "46")]
     it "spells releases the way Ultramarine does" $ do
-      let r44 = Release "44" 44
+      let r44 = Release Fedora "44" 44
       (releaseDist ultramarine r44, releaseBranch ultramarine r44, repoName ultramarine r44) `shouldBe` (".um44", "um44", "um44")
       lookupDistro "ultramarine" `shouldBe` Right ultramarine
       lookupDistro "umbrella" `shouldSatisfy` either (const True) (const False)
@@ -522,23 +523,58 @@ main = hspec $ do
       isRolling tumbleweed `shouldBe` True
       releaseMacros tuatara tumbleweed `shouldBe` [("dist", Nothing), ("fedora", Nothing), ("suse_version", Just "1699"), ("is_opensuse", Just "1")]
       repoUrlFor (distroRepoUrl tuatara) tumbleweed `shouldBe` "https://repos.fyralabs.com/{repo}"
-      baseReposFor OpenSUSE tumbleweed `shouldBe` ["https://download.opensuse.org/tumbleweed/repo/oss", "https://download.opensuse.org/update/tumbleweed"]
+      baseReposFor tumbleweed `shouldBe` ["https://download.opensuse.org/tumbleweed/repo/oss", "https://download.opensuse.org/update/tumbleweed"]
       lookupDistro "tuatara" `shouldBe` Right tuatara
+    it "spells el10 the way Terra EL does" $ do
+      let el10 = el 10
+      (releaseDist terra el10, releaseBranch terra el10, repoName terra el10, releaseLabel el10)
+        `shouldBe` (".el10", "el10", "terrael10", "el10")
+      isRolling el10 `shouldBe` False
+      releaseSubrepos terra el10 `shouldBe` False
+      releaseSubrepos terra (Release Fedora "44" 44) `shouldBe` True
+      releaseMacros terra el10 `shouldBe` [("dist", Just ".el10"), ("fedora", Nothing), ("rhel", Just "10"), ("el10", Just "1"), ("epel", Just "10")]
+      baseReposFor el10
+        `shouldBe` [ "https://repo.almalinux.org/almalinux/10/BaseOS/x86_64/os",
+                     "https://repo.almalinux.org/almalinux/10/AppStream/x86_64/os",
+                     "https://repo.almalinux.org/almalinux/10/CRB/x86_64/os",
+                     "https://repo.almalinux.org/almalinux/10/extras/x86_64/os",
+                     "https://dl.fedoraproject.org/pub/epel/10/Everything/x86_64"
+                   ]
+      releaseCacheTag terra el10 `shouldNotBe` releaseCacheTag terra (Release Fedora "10" 10)
+    it "spells packages-el's releases the same way, minus Fedora" $ do
+      let el10 = el 10
+      (releaseDist terraEl el10, releaseBranch terraEl el10, repoName terraEl el10, releaseSubrepos terraEl el10)
+        `shouldBe` (".el10", "el10", "terrael10", False)
+      distroBases terraEl `shouldBe` [EL]
+      lookupDistro "terra-el" `shouldBe` Right terraEl
+      releaseCacheTag terraEl el10 `shouldNotBe` releaseCacheTag terra el10
+    it "finds EL releases among a remote's branches" $
+      elReleasesFrom ["HEAD", "el11", "f44", "el10", "el", "elx", "el10", "cypress/el10"]
+        `shouldBe` [el 10, el 11]
+    it "reads the repo name out of remote urls" $
+      map remoteRepoName
+        [ "git@github.com:terrapkg/packages-el.git",
+          "https://github.com/terrapkg/packages-el/",
+          "git@github.com:terrapkg/packages",
+          "/srv/git/tuatara.git",
+          "packages"
+        ]
+        `shouldBe` [Just "packages-el", Just "packages-el", Just "packages", Just "tuatara", Nothing]
     it "keeps cache tags apart across distros" $
-      releaseCacheTag terra (Release "rawhide" 46) `shouldNotBe` releaseCacheTag ultramarine (Release "rawhide" 46)
+      releaseCacheTag terra (Release Fedora "rawhide" 46) `shouldNotBe` releaseCacheTag ultramarine (Release Fedora "rawhide" 46)
     it "fills in repo url templates, subrepos included" $ do
-      let cfg url = (snapConfig snapshot) {cfgRepoName = "terra44", cfgRepoUrl = repoUrlFor url (Release "44" 44)}
+      let cfg url = (snapConfig snapshot) {cfgRepoName = "terra44", cfgRepoUrl = repoUrlFor url (Release Fedora "44" 44)}
       repoUrl (cfg defaultRepoUrl) (Just "extras") `shouldBe` "https://tetsudou.fyralabs.com/metalink?repo=terra44-extras&arch=x86_64"
       repoUrl (cfg "https://example.com/um{release}/x86_64") Nothing `shouldBe` "https://example.com/um44/x86_64"
       repoUrl (cfg "https://example.com/terra44") (Just "extras") `shouldBe` "https://example.com/terra44-extras"
     it "takes Fedora releases from Bodhi, rawhide last" $
-      parseBodhiReleases bodhiFixture `shouldBe` Right [Release "43" 43, Release "44" 44, Release "45" 45, Release "rawhide" 46]
+      parseBodhiReleases bodhiFixture `shouldBe` Right [Release Fedora "43" 43, Release Fedora "44" 44, Release Fedora "45" 45, Release Fedora "rawhide" 46]
     it "complains when Bodhi lists nothing useful" $
       parseBodhiReleases "{\"releases\": []}" `shouldSatisfy` either (const True) (const False)
 
   describe "mergeFindings" $ do
-    let r43 = Release "43" 43
-        r44 = Release "44" 44
+    let r43 = Release Fedora "43" 43
+        r44 = Release Fedora "44" 44
         lag dist = Finding "build-lag" "zed" (Just "anda/zed") Error ("never published (spec is at 1.2-1" <> dist <> ")") []
         drift = Finding "drift" "zed" (Just "anda/zed") Warn "upstream has 1.3, spec is at 1.2" []
     it "merges findings that only differ by dist" $
@@ -550,6 +586,9 @@ main = hspec $ do
     it "leaves messages alone when the distro has no dist tag" $
       mergeFindings tuatara [(tumbleweed, [lag "", drift])]
         `shouldBe` [(lag "") {fReleases = ["tumbleweed"]}, drift {fReleases = ["tumbleweed"]}]
+    it "merges EL findings by their own dist" $
+      mergeFindings terra [(el 9, [lag ".el9"]), (el 10, [lag ".el10"])]
+        `shouldBe` [(lag "%{dist}") {fReleases = ["el9", "el10"]}]
     it "keeps the real message for a single release" $
       mergeFindings terra [(r43, [drift]), (r44, [lag ".fc44"])]
         `shouldBe` [drift {fReleases = ["43"]}, (lag ".fc44") {fReleases = ["44"]}]

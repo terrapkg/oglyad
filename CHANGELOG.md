@@ -2,6 +2,13 @@
 
 ## unreleased
 
+- checks Terra EL too: `-d`/`--distro terra-el` for terrapkg/packages-el,
+  picked automatically when the remote's url names packages-el, or
+  `-r el10` on a terrapkg/packages checkout until the split is done. specs
+  see EL's macros (`%rhel`, `%epel`, `%el10`, `.el10`), builds are read
+  from `terrael10`, and `--base` compares against AlmaLinux and EPEL.
+  terra-el checks every `elN` branch by default, terra only checks EL when
+  asked
 - checks terrapkg/tuatara too: `-d`/`--distro tuatara`, or picked
   automatically from a checkout with a `tuatara/` directory. its one
   release is `tumbleweed`, specs see openSUSE's macros instead of Fedora's,
