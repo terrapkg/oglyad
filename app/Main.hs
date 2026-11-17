@@ -254,14 +254,14 @@ main = do
   when (cfgUpstream baseCfg && isNothing token) $
     hPutStrLn stderr "oglyad: no GITHUB_TOKEN (or `gh auth token`), GitHub lookups will hit the 60/hour limit fast"
 
-  let ran = if null optOnly then checkNames else optOnly
+  let ran = filter (`notElem` distroSkippedChecks distro) (if null optOnly then checkNames else optOnly)
       logPrefix rel = if length releases > 1 then T.unpack (releaseLabel rel) <> ": " else ""
   perRelease <- runApp baseCfg . forConcurrentlyN (length releases) releases $ \rel -> do
     let cfg = mkCfg rel
     (snap, collectFindings) <- inRelease cfg (logPrefix rel) $ do
       note ("checking " <> T.unpack (releaseLabel rel) <> " from " <> maybe "the working tree" T.unpack (cfgSpecRef cfg))
       buildSnapshot
-    let findings = collectFindings <> runChecks optOnly snap
+    let findings = collectFindings <> runChecks ran snap
         applied
           | optNoIgnores = Applied findings [] [] []
           | otherwise = applyIgnores checkNames ran ignores (snapIgnoreLabels snap) findings

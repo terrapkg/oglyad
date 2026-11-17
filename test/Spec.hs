@@ -24,7 +24,7 @@ import Oglyad.Regex qualified as Re
 import Oglyad.Release
 import Oglyad.Report (ReleaseInfo (..), Report (..), renderJson, renderMarkdown, renderText)
 import Oglyad.Source.Anda (scriptErrors, stripAnsi)
-import Oglyad.Source.Monorepo (PkgDir (..), checkoutRef, findPackageDirs, hclString, lastCommits, macroFingerprint, specFingerprint, versionMacros)
+import Oglyad.Source.Monorepo (PkgDir (..), checkoutRef, findPackageDirs, hclList, hclString, lastCommits, macroFingerprint, specFingerprint, versionMacros)
 import Oglyad.Source.Repodata (RpmEntry (..), decompressAndParse, fetchRepo, latestBySource, parseMetalink, parsePrimary, srpmName)
 import Oglyad.Source.Rhai (parseUpdateRhai, parseUpdateRhaiWith)
 import Oglyad.Source.RhaiEval (Simulated (..), simulateVersion)
@@ -236,6 +236,9 @@ main = hspec $ do
     it "finds the spec" $ hclString "spec" hcl `shouldBe` Just "zed.spec"
     it "finds the subrepo" $ hclString "subrepo" hcl `shouldBe` Just "extras"
     it "doesn't match key prefixes" $ hclString "sub" hcl `shouldBe` Nothing
+    it "reads lists like arches" $ do
+      hclList "arches" "project pkg {\n  arches = [\"aarch64\", \"x86_64\"]\n}\n" `shouldBe` ["aarch64", "x86_64"]
+      hclList "arches" "project pkg {\n  arch = \"x86_64\"\n}\n" `shouldBe` []
     it "reads bare values like nightly = 1" $ hclString "nightly" "labels {\n  nightly = 2 # slot\n}\n" `shouldBe` Just "2"
 
   describe "parseUpdateRhai" $ do

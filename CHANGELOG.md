@@ -14,6 +14,12 @@
   the lookup fails
 - rpmspec and anda share one pool of `--jobs` slots across all releases
 - the missing `GITHUB_TOKEN` warning is printed once per run
+- `no-autoupdate` doesn't run on Ultramarine, which updates most packages by
+  hand on purpose
+- rpmspec refusing a spec's `BuildArch` isn't reported when the package's
+  anda.hcl `arches` leave out this machine's arch anyway, like a
+  `BuildArch: aarch64` package checked from x86_64. other rpmspec failures
+  are still reported, including for noarch packages pinned to one builder
 
 ## 0.1.4.0
 

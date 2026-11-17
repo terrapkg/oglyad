@@ -27,6 +27,7 @@ import Oglyad.Source.Upstream (latestVersion)
 import Oglyad.Types
 import System.Directory (findExecutable, makeAbsolute)
 import System.FilePath ((</>))
+import System.Info qualified
 
 -- | collect everything. problems along the way become findings instead of
 -- crashes, so one broken spec doesn't take down the whole run.
@@ -145,7 +146,7 @@ readPackages root0 logRef hd dirs = do
         ]
       (errs, pkgs) =
         partitionEithers $
-          [toPackage commits k d (Just i) | Evaluated k d i <- results]
+          [toPackage commits k d (Just i) | Evaluated k d i <- results, not (failedForThisHost d i)]
             <> [toPackage commits "" d Nothing | NoSpec d <- results]
   pure (missing <> errs, pkgs)
 
@@ -154,6 +155,13 @@ data SpecResult
   = Evaluated Text PkgDir (Either Text SpecInfo)
   | NoSpec PkgDir
   | Skipped
+
+failedForThisHost :: PkgDir -> Either Text SpecInfo -> Bool
+failedForThisHost PkgDir {pdArches} = \case
+  Left err -> "No compatible architectures found for build" `T.isInfixOf` err && not buildsHere
+  Right _ -> False
+  where
+    buildsHere = null pdArches || T.pack System.Info.arch `elem` pdArches
 
 -- | last commit per package dir, reused as long as the commit hasn't moved.
 -- uncommitted changes can't change any "last commit", so the commit is the

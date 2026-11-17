@@ -45,12 +45,12 @@ parseCheckName raw
   where
     name = T.pack raw
 
--- | run the named checks (all of them when the list is empty) over every package
+-- | run the named checks over every package
 runChecks :: [Text] -> Snapshot -> [Finding]
-runChecks only snap =
+runChecks names snap =
   [ f
   | (name, chk) <- allChecks,
-    null only || name `elem` only,
+    name `elem` names,
     pkg <- Map.elems (snapPackages snap),
     f <- chk snap pkg
   ]
