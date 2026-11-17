@@ -109,6 +109,7 @@ configP = do
         cfgRelease = relVersion rel,
         cfgDist = releaseDist distro rel,
         cfgBranch = releaseBranch distro rel,
+        cfgRawhide = isRawhide rel,
         cfgStaleAfter = fromIntegral (staleDays * 86400),
         cfgCacheFor = fromIntegral (cacheHours * 3600),
         cfgConcurrency = maybe cores id jobs,

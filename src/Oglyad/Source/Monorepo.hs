@@ -59,7 +59,8 @@ data PkgDir = PkgDir
     pdIgnores :: [Text],
     -- | has a `nightly = N` or `quaterdaily = N` label, so it builds from a
     -- branch head on a schedule rather than from releases
-    pdNightly :: Bool
+    pdNightly :: Bool,
+    pdUpdBranch :: Bool
   }
   deriving stock (Eq, Show)
 
@@ -112,7 +113,8 @@ findPackageDirs root pkgRoot = go pkgRoot
             pdUpdateRhai = rhai,
             pdVersionMacros = specText >>= versionMacros,
             pdIgnores = maybe [] (filter (not . T.null) . map T.strip . T.splitOn ",") (hclString "oglyad_ignore" hcl),
-            pdNightly = any (isJust . (`hclString` hcl)) ["nightly", "quaterdaily"]
+            pdNightly = any (isJust . (`hclString` hcl)) ["nightly", "quaterdaily"],
+            pdUpdBranch = isJust (hclString "updbranch" hcl)
           }
 
 -- | the macro names a spec's Version: line refers to, read from the raw

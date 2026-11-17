@@ -64,10 +64,8 @@ buildSnapshot = do
             }
         | p <- pkgs0
         ]
-  (upErrs, pkgs2) <- if cfgUpstream then withUpstreams now pkgs1 else pure ([], pkgs1)
-  (andaErrs, pkgs) <- case root of
-    Just r | cfgUpstream -> withAnda r now pkgs2
-    _ -> pure ([], pkgs2)
+  (upErrs, withUpstream) <- if cfgUpstream then upstreamVersions now root pkgs1 else pure ([], id)
+  let pkgs = map withUpstream pkgs1
 
   let snap =
         Snapshot
@@ -82,7 +80,17 @@ buildSnapshot = do
         [ (collectErr (T.pack path) ("can't read package dir: " <> err)) {fPath = Just (T.pack path)}
         | (path, err) <- dirErrs
         ]
-  pure (snap, treeErrs <> unreadable <> specErrs <> repoErrs <> upErrs <> andaErrs)
+  pure (snap, treeErrs <> unreadable <> specErrs <> repoErrs <> upErrs)
+
+upstreamVersions :: UTCTime -> Maybe FilePath -> [Package] -> App ([Finding], Package -> Package)
+upstreamVersions now root pkgs = do
+  env <- ask
+  ((upErrs, fromApis), (andaErrs, fromAnda)) <-
+    liftIO $
+      concurrently
+        (runReaderT (withUpstreams now pkgs) env)
+        (runReaderT (maybe (pure ([], id)) (\r -> withAnda r now pkgs) root) env)
+  pure (upErrs <> andaErrs, fromAnda . fromApis)
 
 -- | every repo at once. Terra failures become findings, Fedora ones just mean
 -- no overlap data
@@ -170,6 +178,7 @@ toPackage commits key PkgDir {..} = \case
           pkgPath = pdPath,
           pkgSubrepo = pdSubrepo,
           pkgNightly = pdNightly,
+          pkgUpdBranch = pdUpdBranch,
           pkgSpecPath = pdSpec,
           pkgFingerprint = key,
           pkgSpecEVR = Just siEVR,
@@ -194,7 +203,7 @@ toPackage commits key PkgDir {..} = \case
 -- crates.io allows one request a second, so its lookups run in their own
 -- serial queue next to everything else. inside the shared job pool, a cluster
 -- of crates packages would hold every slot while waiting their turn
-withUpstreams :: UTCTime -> [Package] -> App ([Finding], [Package])
+withUpstreams :: UTCTime -> [Package] -> App ([Finding], Package -> Package)
 withUpstreams now pkgs = do
   Config {..} <- asks envConfig
   when (isNothing cfgGitHubToken) $
@@ -241,14 +250,12 @@ withUpstreams now pkgs = do
   liftIO (saveJson "upstream.json" (new <> recent))
   pure
     ( rateErr,
-      [ case Map.lookup (pkgPath p) byPath of
-          Just (Right v) -> p {pkgUpstreamVer = replay p v}
-          Just (Left (HttpFailed e)) -> p {pkgUpstreamErr = Just e}
-          -- rate limits are reported once above, not as a broken upstream
-          Just (Left (RateLimited _)) -> p
-          Nothing -> p
-      | p <- pkgs
-      ]
+      \p -> case Map.lookup (pkgPath p) byPath of
+        Just (Right v) -> p {pkgUpstreamVer = replay p v}
+        Just (Left (HttpFailed e)) -> p {pkgUpstreamErr = Just e}
+        -- rate limits are reported once above, not as a broken upstream
+        Just (Left (RateLimited _)) -> p
+        Nothing -> p
     )
   where
     -- run the script's guards and edits over the raw value, so a tag the
@@ -272,10 +279,14 @@ withUpstreams now pkgs = do
 -- | run the real anda for scripts oglyad couldn't follow, on a throwaway
 -- copy of the tree, and read the Version it leaves in each spec. results are
 -- cached like upstream answers, keyed by the package's fingerprint
-withAnda :: FilePath -> UTCTime -> [Package] -> App ([Finding], [Package])
+withAnda :: FilePath -> UTCTime -> [Package] -> App ([Finding], Package -> Package)
 withAnda root now pkgs = do
   Config {..} <- asks envConfig
-  let wanted = [p | p@Package {pkgUpstream = Just (Unknown _), pkgSpecPath = Just _} <- pkgs]
+  let wanted =
+        [ p
+        | p@Package {pkgUpstream = Just (Unknown _), pkgSpecPath = Just _} <- pkgs,
+          cfgRawhide || pkgUpdBranch p
+        ]
       cacheFile = "anda" <> T.unpack cfgDist <> ".json"
       maxAge = max cfgCacheFor (diffUTCTime now cfgRunStart)
   cache <- liftIO (fromMaybe Map.empty <$> loadJson cacheFile) :: App (Map Text CacheEntry)
@@ -320,12 +331,10 @@ withAnda root now pkgs = do
   liftIO (saveJson cacheFile (new <> recent))
   pure
     ( problems,
-      [ case answer p of
-          Just (Right v) -> p {pkgUpstreamVer = Just v}
-          Just (Left e) -> p {pkgUpstreamErr = Just ("update.rhai failed under anda: " <> e)}
-          Nothing -> p
-      | p <- pkgs
-      ]
+      \p -> case answer p of
+        Just (Right v) -> p {pkgUpstreamVer = Just v}
+        Just (Left e) -> p {pkgUpstreamErr = Just ("update.rhai failed under anda: " <> e)}
+        Nothing -> p
     )
   where
     join' = either Left id
