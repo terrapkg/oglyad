@@ -1,5 +1,3 @@
--- | the app monad. plain ReaderT over IO is the boring, correct starting point.
--- reach for mtl classes or an effect library only once this actually hurts
 module Oglyad.App
   ( Env (..),
     App,
@@ -15,6 +13,7 @@ module Oglyad.App
   )
 where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent (threadDelay)
 import Control.Concurrent.Async (Async, async, forConcurrently)
 import Control.Concurrent.Async qualified as Async
@@ -28,6 +27,7 @@ import Data.ByteString.Lazy qualified as LBS
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
+import Data.Maybe (fromMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -60,9 +60,8 @@ data Env = Env
     -- | GitHub's secondary rate limits punish lots of concurrent requests
     envGitHubSem :: QSem,
     -- | set once GitHub rate-limits us, so the remaining lookups are skipped
-    -- instead of each failing (and being reported) separately
+    -- instead of each failing and being reported separately
     envGitHubLimited :: IORef (Maybe Text),
-    -- | serializes progress messages so concurrent jobs can't interleave lines
     envLogLock :: MVar (),
     envLogPrefix :: String,
     envProcessSem :: QSem,
@@ -73,8 +72,7 @@ data Env = Env
 type App = ReaderT Env IO
 
 data HttpError
-  = -- | the server said slow down. not the upstream's fault, so not cached
-    -- and not reported per package
+  = -- | not the upstream's fault, so not cached and not reported per package
     RateLimited Text
   | HttpFailed Text
   deriving stock (Eq, Show)
@@ -86,10 +84,12 @@ oglyadVersion = T.pack (showVersion version)
 userAgent :: ByteString
 userAgent = TE.encodeUtf8 ("oglyad/" <> oglyadVersion <> " (+https://github.com/terrapkg/oglyad)")
 
--- | no single response may be larger than this. Fedora's compressed
--- primary.xml is the biggest thing we fetch, at around 30MB
+-- | Fedora's compressed primary.xml is the biggest thing we fetch, at around 30MB
+maxBodyMiB :: Int
+maxBodyMiB = 256
+
 maxBody :: Int
-maxBody = 256 * 1024 * 1024
+maxBody = maxBodyMiB * 1024 * 1024
 
 runApp :: Config -> App a -> IO a
 runApp cfg act = do
@@ -115,7 +115,6 @@ note msg = do
 isGitHubApi :: Text -> Bool
 isGitHubApi = T.isPrefixOf "https://api.github.com/"
 
--- | GET a url, throwing on non-2xx
 httpGet :: Text -> App LBS.ByteString
 httpGet url = do
   Env {..} <- ask
@@ -126,13 +125,12 @@ httpGet url = do
       req' =
         req
           { requestHeaders = ("User-Agent", userAgent) : auth <> requestHeaders req,
-            -- never forward the token if a redirect goes somewhere else
             shouldStripHeaderOnRedirect = (== hAuthorization)
           }
       fetch = withResponse req' envHttp $ \resp -> do
         body <- brReadSome (responseBody resp) (maxBody + 1)
         if LBS.length body > fromIntegral maxBody
-          then throwIO (userError ("response from " <> T.unpack url <> " is over 256MiB"))
+          then throwIO (userError ("response from " <> T.unpack url <> " is over " <> show maxBodyMiB <> "MiB"))
           else pure body
   liftIO $
     if
@@ -140,9 +138,8 @@ httpGet url = do
       | isGitHubApi url -> bracket_ (waitQSem envGitHubSem) (signalQSem envGitHubSem) fetch
       | otherwise -> fetch
 
--- | GET a url, with failures as a short readable Left instead of an
--- exception. a rate limit with a short Retry-After gets one retry. a GitHub
--- rate limit beyond that stops all further GitHub requests for this run
+-- | a short rate limit gets one retry. a longer GitHub one stops all further
+-- GitHub requests for this run
 httpGetE :: Text -> App (Either HttpError LBS.ByteString)
 httpGetE url = do
   env@Env {..} <- ask
@@ -158,7 +155,7 @@ httpGetE url = do
         Left (HttpExceptionRequest _ (StatusCodeException resp _)) -> do
           wait <- rateLimitWait resp
           case wait of
-            Just secs | n == 1 && secs <= 60 -> do
+            Just secs | n == 1 && secs <= longestRetryWait -> do
               threadDelay ((secs + 1) * 1_000_000)
               attempt env (n + 1)
             Just _ -> do
@@ -168,11 +165,11 @@ httpGetE url = do
             Nothing -> pure (Left (HttpFailed ("HTTP " <> T.pack (show (statusCode (responseStatus resp))) <> " from " <> url)))
         Left (HttpExceptionRequest _ content) -> pure (Left (HttpFailed (T.pack (show content) <> " from " <> url)))
         Left (InvalidUrlException u why) -> pure (Left (HttpFailed ("invalid url " <> T.pack u <> ": " <> T.pack why)))
-    host = T.takeWhile (/= '/') (T.drop 8 url)
+    host = T.takeWhile (/= '/') (T.drop (T.length "https://") url)
+    longestRetryWait = 60
 
--- | if this response is a rate limit, how many seconds until it lifts.
--- GitHub signals its primary limit with a 403 and x-ratelimit-remaining: 0,
--- and its secondary limit (too many concurrent requests) with a 403 or 429
+-- | seconds until a rate limit lifts. GitHub signals its primary limit with a
+-- 403 and x-ratelimit-remaining: 0, and its secondary limit with a 403 or 429
 -- plus retry-after
 rateLimitWait :: Response () -> IO (Maybe Int)
 rateLimitWait resp = do
@@ -186,12 +183,9 @@ rateLimitWait resp = do
   pure $
     if
       | status == 429 || (status == 403 && (exhausted || retryAfter /= Nothing)) ->
-          Just (maybe (maybe 3600 id untilReset) id retryAfter)
+          Just (fromMaybe 3600 (retryAfter <|> untilReset))
       | otherwise -> Nothing
 
--- | run an action over a list with at most n in flight at once.
--- 'forConcurrently' lives in IO, so we grab the env and re-run App inside each
--- thread. that dance is exactly what MonadUnliftIO (from unliftio) automates
 forConcurrentlyN :: Int -> [a] -> (a -> App b) -> App [b]
 forConcurrentlyN n xs f = do
   env <- ask

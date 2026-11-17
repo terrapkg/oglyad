@@ -1,5 +1,3 @@
--- | the update.rhai source parsed fine but asking upstream failed. usually a
--- renamed or deleted repo, which means `anda update` is failing on it too
 module Oglyad.Check.UpstreamError (check) where
 
 import Oglyad.Types

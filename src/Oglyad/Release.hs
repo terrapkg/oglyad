@@ -1,7 +1,3 @@
--- | which releases to check, and everything that follows from one and the
--- distro being checked: the repo, the %{dist} tag, the monorepo branch, the
--- rpm macros and the base distro's repos. also merges findings from several
--- releases into one report
 module Oglyad.Release
   ( Base (..),
     baseName,
@@ -60,31 +56,23 @@ baseName = \case
   OpenSUSE -> "openSUSE"
   EL -> "EL"
 
--- | who ships the packages in 'baseReposFor', as the overlap check names them
+-- | who ships the packages in 'baseReposFor'
 baseRepoOwners :: Base -> Text
 baseRepoOwners = \case
   EL -> "AlmaLinux or EPEL"
   b -> baseName b
 
--- | an anda monorepo oglyad knows how to check, and how it spells things per
--- release
 data Distro = Distro
-  { -- | what --distro takes, e.g. "terra"
-    distroName :: Text,
-    -- | what it builds for. releases default to the first one's
+  { distroName :: Text,
+    -- | releases default to the first one's
     distroBases :: [Base],
-    -- | the directory under the monorepo root holding every package, e.g.
-    -- "anda" for terrapkg/packages
     distroRoot :: FilePath,
     distroMarker :: FilePath,
     -- | the monorepo's GitHub repo name, which tells distros with the same
     -- marker apart
     distroUpstream :: Text,
-    -- | the repo's name, with the release name appended: terra for terra43
     distroRepo :: Text,
-    -- | Fedora release branch prefix, f for f43
     distroBranch :: Text,
-    -- | Fedora %{dist} prefix, .fc for .fc43
     distroDist :: Text,
     distroRepoUrl :: Text,
     distroSubrepos :: Bool,
@@ -92,22 +80,71 @@ data Distro = Distro
   }
   deriving stock (Eq, Show)
 
--- | terrapkg/packages. its el10 branch is still around until Terra EL
--- finishes moving to 'terraEl'
+-- | its el10 branch is still around until Terra EL finishes moving to
+-- 'terraEl'
 terra :: Distro
-terra = Distro "terra" [Fedora, EL] "anda" "anda" "packages" "terra" "f" ".fc" defaultRepoUrl True []
+terra =
+  Distro
+    { distroName = "terra",
+      distroBases = [Fedora, EL],
+      distroRoot = "anda",
+      distroMarker = "anda",
+      distroUpstream = "packages",
+      distroRepo = "terra",
+      distroBranch = "f",
+      distroDist = ".fc",
+      distroRepoUrl = defaultRepoUrl,
+      distroSubrepos = True,
+      distroSkippedChecks = []
+    }
 
--- | terrapkg/packages-el. builds land in terrael10, with no subrepos
 terraEl :: Distro
-terraEl = Distro "terra-el" [EL] "anda" "anda" "packages-el" "terra" "" "" defaultRepoUrl False []
+terraEl =
+  Distro
+    { distroName = "terra-el",
+      distroBases = [EL],
+      distroRoot = "anda",
+      distroMarker = "anda",
+      distroUpstream = "packages-el",
+      distroRepo = "terra",
+      distroBranch = "",
+      distroDist = "",
+      distroRepoUrl = defaultRepoUrl,
+      distroSubrepos = False,
+      distroSkippedChecks = []
+    }
 
--- | Ultramarine-Linux/packages. builds land in um43, umrawhide, with
--- .um43 and .umrawhide dist tags
 ultramarine :: Distro
-ultramarine = Distro "ultramarine" [Fedora] "ultramarine" "ultramarine" "packages" "um" "um" ".um" defaultRepoUrl True ["no-autoupdate"]
+ultramarine =
+  Distro
+    { distroName = "ultramarine",
+      distroBases = [Fedora],
+      distroRoot = "ultramarine",
+      distroMarker = "ultramarine",
+      distroUpstream = "packages",
+      distroRepo = "um",
+      distroBranch = "um",
+      distroDist = ".um",
+      distroRepoUrl = defaultRepoUrl,
+      distroSubrepos = True,
+      distroSkippedChecks = ["no-autoupdate"]
+    }
 
 tuatara :: Distro
-tuatara = Distro "tuatara" [OpenSUSE] "" "tuatara" "tuatara" "tuatara-" "" "" "https://repos.fyralabs.com/{repo}" False []
+tuatara =
+  Distro
+    { distroName = "tuatara",
+      distroBases = [OpenSUSE],
+      distroRoot = "",
+      distroMarker = "tuatara",
+      distroUpstream = "tuatara",
+      distroRepo = "tuatara-",
+      distroBranch = "",
+      distroDist = "",
+      distroRepoUrl = "https://repos.fyralabs.com/{repo}",
+      distroSubrepos = False,
+      distroSkippedChecks = []
+    }
 
 distros :: [Distro]
 distros = [terra, terraEl, ultramarine, tuatara]
@@ -117,8 +154,6 @@ lookupDistro raw = case [d | d <- distros, distroName d == T.pack raw] of
   d : _ -> Right d
   [] -> Left ("unknown distro " <> show raw <> ", expected one of: " <> T.unpack (T.intercalate ", " (map distroName distros)))
 
--- | the repo name at the end of a git remote url: packages-el for
--- git@github.com:terrapkg/packages-el.git
 remoteRepoName :: Text -> Maybe Text
 remoteRepoName url = case T.split (`elem` ['/', ':']) (T.dropWhileEnd (== '/') (T.strip url)) of
   parts@(_ : _ : _) | name <- dropGit (last parts), not (T.null name) -> Just name
@@ -130,9 +165,8 @@ remoteRepoName url = case T.split (`elem` ['/', ':']) (T.dropWhileEnd (== '/') (
 -- too, since %fedora still needs one when evaluating specs
 data Release = Release
   { relBase :: Base,
-    -- | "43", "rawhide", "tumbleweed" or "el10"
     relName :: Text,
-    -- | the number %fedora, %suse_version or %rhel expands to
+    -- | what %fedora, %suse_version or %rhel expands to
     relVersion :: Int
   }
   deriving stock (Eq, Show)
@@ -146,8 +180,6 @@ tumbleweed = Release OpenSUSE "tumbleweed" 1699
 el :: Int -> Release
 el n = Release EL ("el" <> T.pack (show n)) n
 
--- | the EL releases a remote has branches for, oldest first: el10 for
--- origin/el10
 elReleasesFrom :: [Text] -> [Release]
 elReleasesFrom branches =
   sortOn relVersion
@@ -159,7 +191,6 @@ elReleasesFrom branches =
       Just n <- [readMaybe (T.unpack digits)]
     ]
 
--- | how releases are spelled in output: f43, rawhide, tumbleweed, el10
 releaseLabel :: Release -> Text
 releaseLabel r
   | relBase r == Fedora && not (isRolling r) = "f" <> relName r
@@ -197,7 +228,6 @@ releaseMacros d r = case relBase r of
 releaseCacheTag :: Distro -> Release -> Text
 releaseCacheTag d r = "-" <> distroName d <> "-" <> relName r
 
--- | the monorepo branch for a release: f43, frawhide, um43, tumbleweed, el10
 releaseBranch :: Distro -> Release -> Text
 releaseBranch d r = case relBase r of
   Fedora -> distroBranch d <> relName r
@@ -208,23 +238,18 @@ releaseBranch d r = case relBase r of
 releaseSubrepos :: Distro -> Release -> Bool
 releaseSubrepos d r = distroSubrepos d && relBase r == Fedora
 
--- | the distro's repo for a release, e.g. terra43 or umrawhide. subrepos
--- add a suffix: terra43-extras
 repoName :: Distro -> Release -> Text
 repoName d r = distroRepo d <> relName r
 
--- | where Fyra Labs' repos are, the same metalink dnf uses. {repo} becomes
--- a 'repoName', with any subrepo suffix
+-- | the same metalink dnf uses
 defaultRepoUrl :: Text
 defaultRepoUrl = "https://tetsudou.fyralabs.com/metalink?repo={repo}&arch=x86_64"
 
--- | a repo url template for one release, with {release} filled in and
--- {repo} left for 'Oglyad.Types.repoUrl'
+-- | {repo} is left for 'Oglyad.Types.repoUrl' to fill in
 repoUrlFor :: Text -> Release -> Text
 repoUrlFor url r = T.replace "{release}" (relName r) url
 
--- | the base distro's own repos, for the overlap check. rawhide has no
--- updates repo. EL builds run on AlmaLinux with EPEL enabled, so both count
+-- | EL builds run on AlmaLinux with EPEL enabled, so both count
 baseReposFor :: Release -> [Text]
 baseReposFor r = case relBase r of
   OpenSUSE ->
@@ -239,13 +264,14 @@ baseReposFor r = case relBase r of
   Fedora -> fedoraRepos
   where
     major = T.pack (show (relVersion r))
-    fedoraRepos      | isRolling r = ["https://dl.fedoraproject.org/pub/fedora/linux/development/rawhide/Everything/x86_64/os"]
+    fedoraRepos
+      | isRolling r = ["https://dl.fedoraproject.org/pub/fedora/linux/development/rawhide/Everything/x86_64/os"]
       | otherwise =
           [ "https://dl.fedoraproject.org/pub/fedora/linux/releases/" <> relName r <> "/Everything/x86_64/os",
             "https://dl.fedoraproject.org/pub/fedora/linux/updates/" <> relName r <> "/Everything/x86_64"
           ]
 
--- | what --release accepts, before we know the distro or rawhide's number
+-- | --release, before we know the distro or rawhide's number
 data ReleaseArg = NumberedArg Int | RawhideArg | TumbleweedArg | ElArg Int
   deriving stock (Eq, Show)
 
@@ -256,7 +282,6 @@ releaseArgBase = \case
   TumbleweedArg -> OpenSUSE
   ElArg _ -> EL
 
--- | 43, f43, rawhide, frawhide, tumbleweed, tw or el10
 parseReleaseArg :: String -> Either String ReleaseArg
 parseReleaseArg raw = case raw of
   "tumbleweed" -> Right TumbleweedArg
@@ -273,14 +298,11 @@ parseReleaseArg raw = case raw of
       | not (null n), all isDigit n = readMaybe n
       | otherwise = Nothing
 
--- | every Fedora release Bodhi hasn't archived. that's the current ones, a
--- branched one before its release, and rawhide
+-- | unarchived releases are the current ones, a branched one before its
+-- release, and rawhide
 bodhiReleasesUrl :: Text
 bodhiReleasesUrl = "https://bodhi.fedoraproject.org/releases/?exclude_archived=true&rows_per_page=100"
 
--- | the maintained Fedora releases in a Bodhi /releases/ response, oldest
--- first with rawhide last. ELN, containers and flatpaks are skipped: only
--- names like F43 count
 parseBodhiReleases :: LBS.ByteString -> Either Text [Release]
 parseBodhiReleases body = do
   v <- either (Left . ("bad json from Bodhi: " <>) . T.pack) Right (eitherDecode body)
@@ -291,9 +313,7 @@ parseBodhiReleases body = do
         [ Release Fedora (if branch == "rawhide" then "rawhide" else ver) n
         | Object r <- rels,
           Just (String name) <- [KM.lookup "name" r],
-          Just ('F', digits) <- [T.uncons name],
-          not (T.null digits),
-          T.all isDigit digits,
+          isFedoraRelease name,
           Just (String ver) <- [KM.lookup "version" r],
           Just n <- [readMaybe (T.unpack ver)],
           Just (String branch) <- [KM.lookup "branch" r]
@@ -301,11 +321,14 @@ parseBodhiReleases body = do
   case found of
     [] -> Left "Bodhi listed no Fedora releases"
     _ -> Right (sortOn (\r -> (isRolling r, relVersion r)) found)
+  where
+    isFedoraRelease name = case T.uncons name of
+      Just ('F', digits) -> not (T.null digits) && T.all isDigit digits
+      _ -> False
 
--- | one list of findings out of each release's. a finding that comes up the
--- same way in several releases is shown once, with fReleases naming them.
--- "the same way" ignores the dist tag, so build-lag's
--- "spec is at 1.2-1.fc43" and "spec is at 1.2-1.fc44" merge into
+-- | a finding that comes up the same way in several releases is shown once,
+-- with fReleases naming them. "the same way" ignores the dist tag, so
+-- build-lag's "spec is at 1.2-1.fc43" and "spec is at 1.2-1.fc44" merge into
 -- "spec is at 1.2-1%{dist}"
 mergeFindings :: Distro -> [(Release, [Finding])] -> [Finding]
 mergeFindings distro perRelease =

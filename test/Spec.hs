@@ -77,8 +77,8 @@ main = hspec $ do
         ("1.0^git1", "1.0^git2", LT),
         ("1.0^20160101", "1.0.1", LT)
       ]
-    it "is reflexive" $ property $ \(V a) -> rpmvercmp a a == EQ
-    it "is antisymmetric" $ property $ \(V a) (V b) ->
+    it "is reflexive" $ property $ \(VersionLike a) -> rpmvercmp a a == EQ
+    it "is antisymmetric" $ property $ \(VersionLike a) (VersionLike b) ->
       rpmvercmp a b == flipOrd (rpmvercmp b a)
 
   describe "normalizeVersion" $ do
@@ -104,7 +104,6 @@ main = hspec $ do
         ("0.42.0", "0.41.0^20261031.9e2ed65", GT),
         -- a snapshot taken after the release it's based on isn't drift
         ("0.41.0", "0.41.0^20261031.9e2ed65", EQ),
-        -- snapshot suffixes don't stop a respelled version from matching
         ("2.0.0-alpha-1-20250926", "2.0.0~alpha~1~20250926.gitfc62ae7", EQ),
         ("0.4-2", "0.4~2^20260805git.d5d9f60", EQ),
         ("1.3", "1.2^20260101git.abc1234", GT),
@@ -218,7 +217,6 @@ main = hspec $ do
       Map.keys (latestBySource entries) `shouldBe` ["zed"]
     it "rejects garbage" $ parsePrimary "<metadata><package>" `shouldSatisfy` isLeft
     it "decompresses zstd through the zstd command" $ do
-      -- the same fixture, compressed by the real zstd tool
       (_, compressed, _) <- readProcess (setStdin (byteStringInput primaryFixture) (proc "zstd" ["-c", "-q"]))
       r <- decompressAndParse "repodata/abc-primary.xml.zst" compressed
       fmap (map rpmName) r `shouldBe` Right ["zed", "zed-cli"]
@@ -684,8 +682,6 @@ flipOrd = compare EQ
 severities :: [Finding] -> [Severity]
 severities = map fSeverity
 
--- * fixtures
-
 now :: UTCTime
 now = UTCTime (fromGregorian 2026 11 9) 0
 
@@ -743,7 +739,7 @@ snapshot =
       snapIgnoreLabels = Map.empty
     }
 
--- | trimmed from tetsudou's answer for terra44, with a second mirror
+-- trimmed from tetsudou's answer for terra44, with a second mirror
 metalinkFixture :: LBS8.ByteString
 metalinkFixture =
   "<?xml version=\"1.0\" encoding=\"utf-8\"?><metalink version=\"3.0\" xmlns=\"http://www.metalinker.org/\" xmlns:mm0=\"http://fedorahosted.org/mirrormanager\" type=\"dynamic\" generator=\"tetsudou\"><files><file name=\"repomd.xml\">\
@@ -802,14 +798,12 @@ primaryFixture =
   \</package>\n\
   \</metadata>\n"
 
--- | version-ish strings: digits, letters and the separators rpm cares about
-newtype V = V Text deriving stock (Show)
+newtype VersionLike = VersionLike Text deriving stock (Show)
 
-instance Arbitrary V where
-  arbitrary = V . T.pack <$> listOf (elements "0123456789abz.~^_")
-  shrink (V t) = V . T.pack <$> shrink (T.unpack t)
+instance Arbitrary VersionLike where
+  arbitrary = VersionLike . T.pack <$> listOf (elements "0123456789abz.~^_")
+  shrink (VersionLike t) = VersionLike . T.pack <$> shrink (T.unpack t)
 
--- | set an environment variable for the duration of an action
 withEnv :: String -> String -> IO a -> IO a
 withEnv key val act =
   bracket

@@ -1,7 +1,5 @@
 name: report
 
-# a nightly health report on terrapkg/packages, posted to the run's job summary
-# and kept as an artifact. read-only: nothing here writes to any repo
 on:
   schedule:
     - cron: "17 6 * * *"
@@ -34,9 +32,8 @@ jobs:
           dnf5 -y -q install $(find anda-build/rpm -name 'oglyad-*.rpm' ! -name '*.src.rpm')
           oglyad --version
 
-      # full history of every branch: stale-build findings use each package's
-      # last commit, and each release's specs come from its own branch
-      # (origin/f43, ..., origin/frawhide)
+      # stale-build findings use each package's last commit, and each release's
+      # specs come from its own branch, so this needs every branch's full history
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           repository: terrapkg/packages
@@ -47,9 +44,8 @@ jobs:
       - name: Trust the checkouts
         run: git config --global --add safe.directory '*'
 
-      # specs using a declarative BuildSystem: need that buildsystem's macros
-      # just to be parsed, and the builder image doesn't ship meson's. without
-      # this those specs show up as false rpmspec errors
+      # specs with a declarative BuildSystem need its macros just to parse, and
+      # the builder image doesn't ship meson's
       - name: Install buildsystem macros
         run: dnf5 -y -q install meson
 

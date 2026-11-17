@@ -1,5 +1,3 @@
--- | reads published dnf repodata: metalink → repomd.xml →
--- primary.xml.{zst,gz,xz} → packages
 module Oglyad.Source.Repodata
   ( RpmEntry (..),
     fetchRepo,
@@ -47,23 +45,20 @@ import Text.XML (Name (..), def, parseLBS)
 import Text.XML.Cursor (attribute, attributeIs, content, element, fromDocument, ($/), ($//), (&/))
 import Text.XML.Stream.Parse (parseBytes)
 
--- | one binary (or source) rpm from primary.xml
--- | strict fields, filled with copied text (see 'finish' in 'parsePrimary'),
--- so a parsed entry never keeps the decompressed file alive
+-- | strict fields with copied text (see 'finish' in 'parsePrimary'), so an
+-- entry never keeps the decompressed file alive
 data RpmEntry = RpmEntry
   { rpmName :: !Text,
     rpmArch :: !Text,
     rpmEVR :: !EVR,
-    -- | e.g. zed-0.190.0-1.fc44.src.rpm, absent on src rpms
+    -- | absent on src rpms
     rpmSourceRpm :: !(Maybe Text),
     rpmBuildTime :: !UTCTime
   }
   deriving stock (Eq, Show)
 
--- | builds per source package for a repo, given its metalink or base url,
--- reusing the last parse when the repo hasn't changed. repomd.xml is tiny,
--- and the primary.xml href in it embeds a checksum, so an unchanged href
--- means unchanged contents
+-- | the primary.xml href in repomd.xml embeds a checksum, so an unchanged
+-- href means the cached parse is still good
 fetchRepo :: Text -> App (Either String (Map Text RepoBuild))
 fetchRepo url = do
   located <- fetchRepomd url
@@ -81,10 +76,9 @@ fetchRepo url = do
             Left _ -> pure ()
           pure r
 
--- | a repo's repomd.xml, and the base url it came from. a url with
--- "metalink" in it is read like dnf reads one: try its mirrors by
--- preference, and take the first repomd.xml whose sha256 the metalink
--- lists, so a mirror that hasn't synced yet is skipped
+-- | metalinks are read like dnf reads them: mirrors by preference, taking the
+-- first repomd.xml whose sha256 the metalink lists, so a mirror that hasn't
+-- synced yet is skipped
 fetchRepomd :: Text -> App (Either String (Text, LBS.ByteString))
 fetchRepomd url
   | "metalink" `T.isInfixOf` url =
@@ -105,9 +99,8 @@ fetchRepomd url
             | otherwise -> tryMirrors hashes (T.unpack m <> " doesn't match the metalink's checksum, is the mirror behind?") rest
     sha256 = TE.decodeUtf8 . B16.encode . SHA256.hashlazy
 
--- | the sha256 hashes a metalink accepts for repomd.xml (the current one and
--- any alternates, which are recent ones mirrors may still serve), and its
--- mirrors' repomd.xml urls, most preferred first
+-- | the hashes include alternates, recent repomd.xml versions mirrors may
+-- still serve
 parseMetalink :: LBS.ByteString -> Either String ([Text], [Text])
 parseMetalink bs = do
   doc <- first show (parseLBS def bs)
@@ -123,7 +116,6 @@ parseMetalink bs = do
         ]
   Right (map T.strip hashes, map snd (sortOn (Down . fst) urls))
 
--- | fetch and parse the primary.xml at a href from repomd.xml
 fetchPrimaryAt :: Text -> Text -> App (Either String [RpmEntry])
 fetchPrimaryAt base href = do
   download <- httpGetE (base <> "/" <> href)
@@ -136,27 +128,24 @@ httpErr = \case
   RateLimited why -> T.unpack why
   HttpFailed why -> T.unpack why
 
--- | decompress a primary.xml by its file extension and parse it, streaming
--- from the decompressor's pipe so even Fedora's ~250MB file never sits in
--- memory.
---
--- decompression goes through the zstd, gzip and xz commands, which every
--- Fedora install has. Fedora doesn't package a Haskell zstd binding, and
--- oglyad should build from Fedora's own libraries
+-- | streams from the decompressor's pipe, so even Fedora's ~250MB file never
+-- sits in memory. it shells out to zstd, gzip and xz because Fedora doesn't
+-- package a Haskell zstd binding, and oglyad should build from Fedora's own
+-- libraries
 decompressAndParse :: Text -> LBS.ByteString -> IO (Either String [RpmEntry])
 decompressAndParse href compressed
-  | ".zst" `T.isSuffixOf` href = viaCommand "zstd" ["--decompress", "--stdout", "--quiet"]
-  | ".gz" `T.isSuffixOf` href = viaCommand "gzip" ["--decompress", "--stdout", "--quiet"]
-  | ".xz" `T.isSuffixOf` href = viaCommand "xz" ["--decompress", "--stdout", "--quiet"]
+  | ".zst" `T.isSuffixOf` href = viaCommand "zstd"
+  | ".gz" `T.isSuffixOf` href = viaCommand "gzip"
+  | ".xz" `T.isSuffixOf` href = viaCommand "xz"
   | ".xml" `T.isSuffixOf` href = pure (parsePrimary compressed)
   | otherwise = pure (Left ("don't know how to decompress " <> T.unpack href))
   where
-    -- feed the download to the command's stdin and parse its stdout as it
-    -- arrives. a corrupt archive makes the command fail, which shows up as
-    -- a parse error or a non-zero exit, never a crash
-    viaCommand cmd args = do
+    -- a corrupt archive shows up as a parse error or a non-zero exit, never a
+    -- crash
+    viaCommand cmd = do
       env <- childEnv <$> getEnvironment
-      let cfg = setEnv env (setStdin (byteStringInput compressed) (setStdout createPipe (setStderr nullStream (proc cmd args))))
+      let decompressToStdout = ["--decompress", "--stdout", "--quiet"]
+          cfg = setEnv env (setStdin (byteStringInput compressed) (setStdout createPipe (setStderr nullStream (proc cmd decompressToStdout))))
       r <- try $ withProcessTerm cfg $ \p -> do
         parsed <- parsePrimaryHandle (getStdout p)
         code <- waitExitCode p
@@ -171,12 +160,7 @@ commonNs n = Name n (Just "http://linux.duke.edu/metadata/common") Nothing
 rpmNs n = Name n (Just "http://linux.duke.edu/metadata/rpm") Nothing
 metalinkNs n = Name n (Just "http://www.metalinker.org/") Nothing
 
--- | find the location of primary.xml in repomd.xml.
--- this uses the xml-conduit Cursor api, which builds the whole document in
--- memory. that's fine for a 2KB file:
---   $//  = all descendants matching
---   &/   = children matching
---   >=>  = compose two axes (it's just Kleisli composition on lists)
+-- | builds the whole document in memory, which is fine for a 2KB file
 parseRepomd :: LBS.ByteString -> Either String Text
 parseRepomd bs = do
   doc <- first show (parseLBS def bs)
@@ -188,7 +172,6 @@ parseRepomd bs = do
     (h : _) -> Right h
     [] -> Left "no primary entry in repomd.xml"
 
--- | what we've seen so far of the <package> we're currently inside
 data PkgAcc = PkgAcc
   { accName :: Text,
     accArch :: Text,
@@ -200,36 +183,26 @@ data PkgAcc = PkgAcc
 emptyAcc :: PkgAcc
 emptyAcc = PkgAcc "" "" Nothing Nothing Nothing
 
--- | which element's text we're currently collecting
 data Capture = CapName | CapArch | CapSrpm | CapNone
   deriving stock (Eq)
 
 data St = St
   { stAcc :: !PkgAcc,
     stCap :: !Capture,
-    -- | finished packages, newest first
     stOut :: [RpmEntry],
-    -- | open elements, nonzero at the end means a truncated file
-    stDepth :: !Int
+    stOpenElements :: !Int
   }
 
--- | parse decompressed primary.xml from memory. the real runs stream from a
--- pipe with 'parsePrimaryHandle'. this one is for small inputs and tests.
---
--- unlike repomd.xml this file is big (Terra's is ~20MB, Fedora's is ~200MB)
--- so we never build a DOM. instead the XML is turned into a stream of events
--- (element opened, text, element closed, ...) and folded over with a small
--- state machine. memory use stays proportional to the results, not the file
+-- | for small inputs and tests. real runs stream with 'parsePrimaryHandle'.
+-- primary.xml is too big for a DOM (Fedora's is ~200MB), so XML events are
+-- folded over instead, keeping memory proportional to the results
 parsePrimary :: LBS.ByteString -> Either String [RpmEntry]
 parsePrimary bs =
   first (\e -> show (e :: SomeException)) (runConduit (sourceLazy bs .| parseBytes def .| foldlC stepPrimary st0))
     >>= finishPrimary
 
--- | parse primary.xml straight from a handle.
---
--- reading the handle chunk by chunk matters: handing the parser a lazy
--- ByteString instead lets the thunk evaluating it hold on to the start of the
--- stream, which keeps the whole decompressed file (250MB for Fedora) alive
+-- | reads chunk by chunk because a lazy ByteString would let its thunk hold
+-- on to the start of the stream, keeping the whole decompressed file alive
 -- until parsing ends
 parsePrimaryHandle :: Handle -> IO (Either String [RpmEntry])
 parsePrimaryHandle h = do
@@ -241,14 +214,13 @@ st0 = St emptyAcc CapNone [] 0
 
 finishPrimary :: St -> Either String [RpmEntry]
 finishPrimary final
-  | stDepth final /= 0 = Left "primary.xml ends in the middle of an element, truncated download?"
+  | stOpenElements final /= 0 = Left "primary.xml ends in the middle of an element, truncated download?"
   | otherwise = Right (reverse (stOut final))
 
--- | one xml event. tracks element depth so truncation can be detected
 stepPrimary :: St -> Event -> St
 stepPrimary cur ev = case ev of
-  EventBeginElement _ _ -> step cur {stDepth = stDepth cur + 1} ev
-  EventEndElement _ -> step cur {stDepth = stDepth cur - 1} ev
+  EventBeginElement _ _ -> step cur {stOpenElements = stOpenElements cur + 1} ev
+  EventEndElement _ -> step cur {stOpenElements = stOpenElements cur - 1} ev
   _ -> step cur ev
   where
     step st = \case
@@ -277,13 +249,9 @@ stepPrimary cur ev = case ev of
         | otherwise -> st {stCap = CapNone}
       _ -> st
 
-    -- the text we collected is sliced out of the parser's buffers, and a
-    -- slice keeps its whole buffer alive. copying is what stops 75k Fedora
-    -- entries from pinning the entire decompressed file in memory
-    --
-    -- the build time needs the same care. UTCTime's fields are lazy, so
-    -- without a deep force it stays a thunk pointing at the xml attribute it
-    -- came from, which pins that attribute's whole decoder chunk
+    -- collected text is a slice of the parser's buffers and keeps the whole
+    -- buffer alive, so it's copied. UTCTime's fields are lazy, so the build
+    -- time is deep forced for the same reason
     finish PkgAcc {..} = do
       EVR e v r <- accEVR
       t <- accTime
@@ -305,8 +273,6 @@ stepPrimary cur ev = case ev of
       Right (n, "") -> Just n
       _ -> Nothing
 
--- | source package name from a srpm filename: strip ".src.rpm", then the last
--- two dash-separated fields (version and release)
 srpmName :: Text -> Maybe Text
 srpmName file = do
   base <- T.stripSuffix ".src.rpm" file
@@ -315,8 +281,6 @@ srpmName file = do
     then Nothing
     else Just (T.intercalate "-" (take (length parts - 2) parts))
 
--- | collapse binary rpms down to one build per source package, keeping the
--- newest build time. this is what lets us line repodata up with the monorepo
 latestBySource :: [RpmEntry] -> Map Text RepoBuild
 latestBySource = foldr step Map.empty
   where

@@ -1,5 +1,3 @@
--- | reports update.rhai shapes our parser doesn't understand yet. this is your
--- to-do list for Oglyad.Source.Rhai
 module Oglyad.Check.UnparsedRhai (check) where
 
 import Data.Maybe (isJust)
@@ -10,18 +8,15 @@ import Oglyad.Types
 check :: Check
 check Snapshot {snapConfig} p@Package {..} =
   broken <> case pkgUpstream of
-    -- anda ran it for us, so there's an answer (or an upstream-error)
+    -- anda ran it, so there's already an answer or an upstream-error
     Just (Unknown _) | isJust pkgUpstreamVer || isJust pkgUpstreamErr -> []
     Just (Unknown _) | not (cfgRolling snapConfig || pkgUpdBranch) -> []
     Just (Unknown raw) ->
-      [finding "unparsed-rhai" p Info ("can't parse update.rhai: " <> T.take 80 (head' (T.lines raw)))]
+      [finding "unparsed-rhai" p Info ("can't parse update.rhai: " <> T.take 80 (T.takeWhile (/= '\n') raw))]
     _ -> []
   where
-    -- not our parser's limits but a script Rhai itself rejects, so
-    -- `anda update` fails on it every run
+    -- Rhai itself rejects these, so `anda update` fails on them every run
     broken = case tokenize <$> pkgRhai of
       Just (Just toks)
         | not (balanced toks) -> [finding "unparsed-rhai" p Warn "update.rhai has unbalanced brackets, so anda can't run it"]
       _ -> []
-    head' (l : _) = l
-    head' [] = ""

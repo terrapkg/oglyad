@@ -1,4 +1,3 @@
--- | the imperative shell: gather every data source into one 'Snapshot'
 module Oglyad.Collect
   ( buildSnapshot,
   )
@@ -6,7 +5,7 @@ where
 
 import Control.Concurrent.Async (concurrently)
 import Control.Concurrent.MVar (withMVar)
-import Control.Monad (forM)
+import Control.Monad (forM, join)
 import Control.Monad.Reader (ask, asks, liftIO, runReaderT)
 import Data.Either (partitionEithers)
 import Data.List (nub, partition)
@@ -15,7 +14,7 @@ import Data.Map.Strict qualified as Map
 import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
-import Data.Time (UTCTime, diffUTCTime, getCurrentTime, nominalDay)
+import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime, nominalDay)
 import Oglyad.App (App, Env (..), HttpError (..), forConcurrentlyN, lookupOnce, note, processSlot)
 import Oglyad.Source.Anda (projectNames, updateProject, withScratchCopy)
 import Oglyad.Source.Cache (CacheEntry (..), UpstreamCache, loadJson, lookupFresh, saveJson)
@@ -29,8 +28,8 @@ import System.Directory (findExecutable, makeAbsolute)
 import System.FilePath ((</>))
 import System.Info qualified
 
--- | collect everything. problems along the way become findings instead of
--- crashes, so one broken spec doesn't take down the whole run.
+-- | problems along the way become findings instead of crashes, so one broken
+-- spec doesn't take down the whole run.
 --
 -- the monorepo work (rpmspec, git) is all local cpu and the repodata work is
 -- all network, so the two halves run at the same time
@@ -38,17 +37,14 @@ buildSnapshot :: App (Snapshot, [Finding])
 buildSnapshot = do
   cfg@Config {..} <- asks envConfig
   now <- liftIO getCurrentTime
-  -- specs come from a release branch extracted into the cache, or straight
-  -- from the working tree with --worktree
   tree <- liftIO $ case cfgSpecRef of
     Nothing -> Right . (cfgMonorepo,"HEAD",) <$> headCommit cfgMonorepo
     Just ref -> fmap (\(dir, sha) -> (dir, sha, Just sha)) <$> checkoutRef cfgMonorepo ref
   let (root, logRef, hd, treeErrs) = case tree of
         Right (r, l, h) -> (Just r, l, h, [])
-        Left err -> (Nothing, "HEAD", Nothing, [collectErr (maybe "monorepo" id cfgSpecRef) err])
+        Left err -> (Nothing, "HEAD", Nothing, [collectErr (fromMaybe "monorepo" cfgSpecRef) err])
   (dirErrs, dirs) <- partitionEithers <$> liftIO (maybe (pure []) (`findPackageDirs` cfgRoot) root)
 
-  -- the main repo, every subrepo some package asked for, and Fedora
   let subrepos = if cfgSubrepos then nub (map Just (mapMaybe pdSubrepo dirs)) else []
       terraRepos = [(s, repoUrl cfg s) | s <- Nothing : subrepos]
       publishedTo p = if cfgSubrepos then pkgSubrepo p else Nothing
@@ -56,7 +52,7 @@ buildSnapshot = do
   ((specErrs, pkgs0), (terra, base)) <-
     liftIO $
       concurrently
-        (runReaderT (readPackages (maybe cfgMonorepo id root) logRef hd dirs) env)
+        (runReaderT (readPackages (fromMaybe cfgMonorepo root) logRef hd dirs) env)
         (runReaderT (fetchRepos terraRepos cfgBaseRepos) env)
 
   let (repoErrs, repos) = partitionEithers terra
@@ -96,8 +92,8 @@ upstreamVersions now root pkgs = do
         (runReaderT (maybe (pure ([], id)) (\r -> withAnda r now pkgs) root) env)
   pure (upErrs <> andaErrs, fromAnda . fromApis)
 
--- | every repo at once. Terra failures become findings, base distro ones
--- just mean no overlap data
+-- | Terra failures become findings, base distro ones just mean no overlap
+-- data
 fetchRepos ::
   [(Maybe Text, Text)] ->
   [Text] ->
@@ -109,10 +105,8 @@ fetchRepos terraRepos baseRepos = do
     Right url -> Right . either (const Map.empty) id <$> fetchRepo url
   pure (partitionEithers results)
 
--- | evaluate every spec under root, reusing cached evaluations for unchanged
--- packages. logRef and hd say which commit's history to read commit times from
 readPackages :: FilePath -> Text -> Maybe Text -> [PkgDir] -> App ([Finding], [Package])
-readPackages root0 logRef hd dirs = do
+readPackages root0 logRef headSha dirs = do
   Config {..} <- asks envConfig
   root <- liftIO (makeAbsolute root0)
   -- one cache file per release, so cron jobs checking different releases
@@ -121,7 +115,7 @@ readPackages root0 logRef hd dirs = do
   (commits, (macros, cache)) <-
     liftIO $
       concurrently
-        (commitTimes cfgMonorepo cfgRoot logRef hd cfgCacheTag (map pdPath dirs))
+        (commitTimes cfgMonorepo cfgRoot logRef headSha cfgCacheTag (map pdPath dirs))
         ((,) <$> macroFingerprint <*> (fromMaybe Map.empty <$> loadJson cacheFile))
   keyed <- forConcurrentlyN cfgConcurrency dirs $ \d -> liftIO $ do
     key <- specFingerprint macros cfgMacros root (pdPath d)
@@ -152,7 +146,6 @@ readPackages root0 logRef hd dirs = do
             <> [toPackage commits "" d Nothing | NoSpec d <- results]
   pure (missing <> errs, pkgs)
 
--- | what happened to one package dir's spec
 data SpecResult
   = Evaluated Text PkgDir (Either Text SpecInfo)
   | NoSpec PkgDir
@@ -165,9 +158,8 @@ failedForThisHost PkgDir {pdArches} = \case
   where
     buildsHere = null pdArches || T.pack System.Info.arch `elem` pdArches
 
--- | last commit per package dir, reused as long as the commit hasn't moved.
--- uncommitted changes can't change any "last commit", so the commit is the
--- whole key. one cache file per release, since each reads its own branch
+-- | uncommitted changes can't change any "last commit", so the commit is the
+-- whole cache key. one cache file per release, since each reads its own branch
 commitTimes :: FilePath -> FilePath -> Text -> Maybe Text -> Text -> [FilePath] -> IO (Map FilePath UTCTime)
 commitTimes mono pkgRoot ref hd tag dirs = do
   let file = "commits" <> T.unpack tag <> ".json"
@@ -196,8 +188,7 @@ toPackage commits key PkgDir {..} = \case
           pkgSpecEVR = Just siEVR,
           pkgRepoBuild = Nothing,
           pkgLastCommit = Map.lookup pdPath commits,
-          -- an update.rhai with nothing but comments in it updates nothing
-          pkgUpstream = parseUpdateRhaiWith pdVersionMacros <$> (pdUpdateRhai >>= nonEmpty),
+          pkgUpstream = parseUpdateRhaiWith pdVersionMacros <$> (pdUpdateRhai >>= unlessOnlyComments),
           pkgRhai = pdUpdateRhai,
           pkgUpstreamVer = Nothing,
           pkgUpstreamErr = Nothing,
@@ -205,25 +196,20 @@ toPackage commits key PkgDir {..} = \case
         }
   where
     firstLine t = let l = T.takeWhile (/= '\n') t in if T.null l then "(no output)" else l
-    nonEmpty script = case tokenize script of
+    unlessOnlyComments script = case tokenize script of
       Just [] -> Nothing
       _ -> Just script
     pathErr msg = (collectErr (T.pack pdPath) msg) {fPath = Just (T.pack pdPath)}
 
--- | fill in upstream versions, from the cache when it's fresh enough.
---
--- crates.io allows one request a second, so its lookups run in their own
+-- | crates.io allows one request a second, so its lookups run in their own
 -- serial queue next to everything else. inside the shared job pool, a cluster
 -- of crates packages would hold every slot while waiting their turn
 withUpstreams :: UTCTime -> [Package] -> App ([Finding], Package -> Package)
 withUpstreams now pkgs = do
-  Config {..} <- asks envConfig
+  cfg@Config {..} <- asks envConfig
   cache <- liftIO (fromMaybe Map.empty <$> loadJson "upstream.json") :: App UpstreamCache
   let wanted = [p | p <- pkgs, Just src <- [pkgUpstream p], lookable src]
-      -- anything fetched since this run started is fresh, so checking several
-      -- releases asks each upstream once even with --cache-hours 0
-      maxAge = max cfgCacheFor (diffUTCTime now cfgRunStart)
-      fresh p = pkgUpstream p >>= \src -> lookupFresh maxAge now src cache
+      fresh p = pkgUpstream p >>= \src -> lookupFresh (cacheMaxAge cfg now) now src cache
       (crates, others) = partition (isCrates . pkgUpstream) wanted
       lookup1 p = case (fresh p, pkgUpstream p) of
         (Just e, _) -> pure (pkgPath p, either (Left . HttpFailed) Right (ceResult e))
@@ -285,22 +271,18 @@ withUpstreams now pkgs = do
       Just (Crates _ _) -> True
       _ -> False
 
--- | run the real anda for scripts oglyad couldn't follow, on a throwaway
--- copy of the tree, and read the Version it leaves in each spec. results are
--- cached like upstream answers, keyed by the package's fingerprint
 withAnda :: FilePath -> UTCTime -> [Package] -> App ([Finding], Package -> Package)
 withAnda root now pkgs = do
-  Config {..} <- asks envConfig
+  cfg@Config {..} <- asks envConfig
   let wanted =
         [ p
         | p@Package {pkgUpstream = Just (Unknown _), pkgSpecPath = Just _} <- pkgs,
           cfgRolling || pkgUpdBranch p
         ]
       cacheFile = "anda" <> T.unpack cfgCacheTag <> ".json"
-      maxAge = max cfgCacheFor (diffUTCTime now cfgRunStart)
   cache <- liftIO (fromMaybe Map.empty <$> loadJson cacheFile) :: App (Map Text CacheEntry)
   let fresh p = case Map.lookup (pkgFingerprint p) cache of
-        Just e | diffUTCTime now (ceFetched e) <= maxAge -> Just e
+        Just e | diffUTCTime now (ceFetched e) <= cacheMaxAge cfg now -> Just e
         _ -> Nothing
       misses = [p | p <- wanted, isNothing (fresh p)]
   hasAnda <- liftIO (isJust <$> findExecutable "anda")
@@ -327,7 +309,7 @@ withAnda root now pkgs = do
                           either (Left . ("rpmspec failed on the updated spec: " <>)) (Right . evrVersion . siEVR)
                             <$> querySpec cfgMacros (copy </> spec)
                     _ -> pure (Left "anda doesn't list this project")
-          pure $ case join' r of
+          pure $ case join r of
             Left e -> ([(collectErr "anda" e) {fSeverity = Warn}], Map.empty)
             Right xs -> ([], Map.fromList xs)
   let answer p = maybe (Map.lookup (pkgPath p) ran) (Just . ceResult) (fresh p)
@@ -337,8 +319,7 @@ withAnda root now pkgs = do
           | p <- misses,
             Just (Right v) <- [Map.lookup (pkgPath p) ran]
           ]
-      recent = Map.filter (\e -> diffUTCTime now (ceFetched e) < 30 * nominalDay) cache
-  liftIO (saveJson cacheFile (new <> recent))
+  liftIO (saveJson cacheFile (new <> Map.filter (fetchedThisMonth now) cache))
   pure
     ( problems,
       \p -> case answer p of
@@ -346,16 +327,21 @@ withAnda root now pkgs = do
         Just (Left e) -> p {pkgUpstreamErr = Just ("update.rhai failed under anda: " <> e)}
         Nothing -> p
     )
-  where
-    join' = either Left id
+
+-- | anything fetched since this run started is fresh, so checking several
+-- releases asks each upstream once even with --cache-hours 0
+cacheMaxAge :: Config -> UTCTime -> NominalDiffTime
+cacheMaxAge Config {..} now = max cfgCacheFor (diffUTCTime now cfgRunStart)
+
+fetchedThisMonth :: UTCTime -> CacheEntry -> Bool
+fetchedThisMonth now e = diffUTCTime now (ceFetched e) < 30 * nominalDay
 
 saveSharedCache :: FilePath -> UTCTime -> Map Text CacheEntry -> App ()
 saveSharedCache file now new = do
   lock <- asks envCacheLock
   liftIO . withMVar lock $ \_ -> do
     onDisk <- fromMaybe Map.empty <$> loadJson file
-    let askedForThisMonth e = diffUTCTime now (ceFetched e) < 30 * nominalDay
-    saveJson file (new <> Map.filter askedForThisMonth onDisk)
+    saveJson file (new <> Map.filter (fetchedThisMonth now) onDisk)
 
 collectErr :: Text -> Text -> Finding
 collectErr what msg = Finding {fCheck = "collect", fPackage = what, fPath = Nothing, fSeverity = Error, fMessage = msg, fReleases = []}

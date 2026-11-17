@@ -1,4 +1,3 @@
--- | the check registry. adding a check = write a module, add a line here
 module Oglyad.Check
   ( allChecks,
     checkNames,
@@ -35,8 +34,8 @@ allChecks =
 checkNames :: [Text]
 checkNames = map fst allChecks
 
--- | validate a check name from the command line. a typo has to be an error,
--- otherwise `--only buildlag` quietly runs nothing and reports all clear
+-- | a typo has to be an error, otherwise `--only buildlag` quietly runs
+-- nothing and reports all clear
 parseCheckName :: String -> Either String Text
 parseCheckName raw
   | name `elem` checkNames = Right name
@@ -45,7 +44,6 @@ parseCheckName raw
   where
     name = T.pack raw
 
--- | run the named checks over every package
 runChecks :: [Text] -> Snapshot -> [Finding]
 runChecks names snap =
   [ f

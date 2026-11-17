@@ -1,8 +1,6 @@
--- | two monorepo directories building the same source package into the same
--- repo. only one build can be live in a repo, so they overwrite each other,
--- and nothing (including build-lag) can tell which one a published rpm came
--- from. sometimes deliberate (a bootstrap build, a 32-bit variant), sometimes
--- a copy-pasted Name: that was never changed
+-- | only one build can be live in a repo, so two directories with the same
+-- Name: overwrite each other and nothing can tell which one a published rpm
+-- came from
 module Oglyad.Check.DuplicateName (check) where
 
 import Data.Map.Strict qualified as Map

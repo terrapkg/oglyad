@@ -1,14 +1,3 @@
--- | silencing findings that are known and intentional.
---
--- two sources, both matched by check name:
---
---   * an ignore file (--ignore-file), where every entry names a package by
---     monorepo path or package name and must give a reason
---   * an `oglyad_ignore = "check, other-check"` label in a package's
---     anda.hcl, so the exception lives next to the package
---
--- ignored findings don't count toward the exit code. ignore-file entries that
--- no longer match anything are reported, so stale exceptions get cleaned up
 module Oglyad.Ignore
   ( IgnoreRule (..),
     Target (..),
@@ -29,12 +18,9 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Oglyad.Types
 
--- | what an ignore rule points at
 data Target
-  = -- | a monorepo directory, e.g. anda/langs/zig/master-bootstrap
-    ByPath Text
-  | -- | every directory building this package name
-    ByName Text
+  = ByPath Text
+  | ByName Text
   deriving stock (Eq, Show)
 
 data IgnoreRule = IgnoreRule
@@ -64,7 +50,6 @@ instance FromJSON IgnoreFile where
           then fail ("entry for " <> T.unpack check <> " has an empty reason. say why it's ok")
           else pure (IgnoreRule check target reason)
 
--- | parse and validate an ignore file against the known check names
 parseIgnoreFile :: [Text] -> ByteString -> Either String IgnoreFile
 parseIgnoreFile known raw = do
   f@(IgnoreFile rules) <- eitherDecodeStrict raw
@@ -73,24 +58,17 @@ parseIgnoreFile known raw = do
     bad -> Left ("unknown checks in ignore file: " <> T.unpack (T.intercalate ", " bad))
 
 data Applied = Applied
-  { -- | findings that still count
-    apKept :: [Finding],
-    -- | findings an ignore matched
+  { apKept :: [Finding],
     apIgnored :: [Finding],
-    -- | ignore file entries that matched nothing. kept apart from apProblems
-    -- because with several releases, an entry is only unused if it matched
-    -- nothing in any of them
+    -- | kept apart from apProblems because with several releases, an entry is
+    -- only unused if it matched nothing in any of them
     apUnused :: [Finding],
     -- | unknown check names in anda.hcl labels
     apProblems :: [Finding]
   }
 
--- | split findings into kept and ignored. known is every check name, ran is
--- the ones that ran this time (an entry for a check that didn't run isn't
--- unused, just idle). labels maps a monorepo path to the check names its
--- anda.hcl ignores
 applyIgnores :: [Text] -> [Text] -> IgnoreFile -> Map FilePath [Text] -> [Finding] -> Applied
-applyIgnores known ran (IgnoreFile rules) labels findings =
+applyIgnores knownChecks checksRun (IgnoreFile rules) ignoresByPath findings =
   Applied
     { apKept = kept,
       apIgnored = ignored,
@@ -101,7 +79,7 @@ applyIgnores known ran (IgnoreFile rules) labels findings =
     (ignored, kept) = partition isIgnored findings
     isIgnored f = byLabel f || any (`matches` f) rules
     byLabel f = case fPath f of
-      Just path -> fCheck f `elem` Map.findWithDefault [] (T.unpack path) labels
+      Just path -> fCheck f `elem` Map.findWithDefault [] (T.unpack path) ignoresByPath
       Nothing -> False
     matches r f =
       irCheck r == fCheck f && case irTarget r of
@@ -117,7 +95,8 @@ applyIgnores known ran (IgnoreFile rules) labels findings =
             fReleases = []
           }
       | r <- rules,
-        irCheck r `elem` ran,
+        -- an entry for a check that didn't run is idle, not unused
+        irCheck r `elem` checksRun,
         not (any (matches r) findings)
       ]
     badLabels =
@@ -129,9 +108,9 @@ applyIgnores known ran (IgnoreFile rules) labels findings =
             fMessage = "oglyad_ignore in anda.hcl names unknown check " <> c,
             fReleases = []
           }
-      | (path, cs) <- Map.toList labels,
+      | (path, cs) <- Map.toList ignoresByPath,
         c <- cs,
-        c `notElem` known
+        c `notElem` knownChecks
       ]
     describe = \case
       ByPath p -> p

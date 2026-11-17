@@ -9,7 +9,6 @@ on:
 permissions:
   contents: read
 
-# a newer push to the same branch or PR cancels the run it replaces
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
@@ -40,11 +39,9 @@ jobs:
           unzip -q -d "$RUNNER_TEMP/ormolu" "$RUNNER_TEMP/ormolu-x86_64-linux.zip"
           echo "$RUNNER_TEMP/ormolu" >> "$GITHUB_PATH"
 
-      # prints a diff for every unformatted file. fix them locally with:
-      #   ormolu --mode inplace $(git ls-files '*.hs')
-      # in a container the checkout belongs to another user, so git refuses to
-      # read it until it's marked safe. an empty file list is an error, since
-      # ormolu would otherwise wait on stdin
+      # fix locally with: ormolu --mode inplace $(git ls-files '*.hs')
+      # the container's checkout belongs to another user, so git needs it marked safe.
+      # ormolu waits on stdin when given no files, so an empty list fails instead
       - name: Check formatting
         shell: bash
         run: |

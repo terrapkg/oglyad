@@ -1,7 +1,5 @@
--- | RPM version handling: EVR parsing and the rpmvercmp algorithm
---
--- reference implementation: rpmio/rpmvercmp.c in rpm-software-management/rpm
--- test vectors: tests/rpmvercmp.at in the same repo
+-- | ports rpmio/rpmvercmp.c from rpm-software-management/rpm, tested
+-- against its tests/rpmvercmp.at
 module Oglyad.Version
   ( EVR (..),
     parseEVR,
@@ -15,19 +13,17 @@ where
 
 import Data.Aeson (FromJSON, ToJSON)
 import Data.Char (isAlphaNum, isAsciiLower, isAsciiUpper, isDigit)
-import Data.List (find, minimumBy)
+import Data.List (minimumBy)
+import Data.Maybe (fromMaybe)
 import Data.Ord (comparing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import GHC.Generics (Generic)
 import Text.Read (readMaybe)
 
--- | epoch:version-release
---
--- note: 'Eq' is structural but 'Ord' goes through rpmvercmp, so "1.05" and
--- "1.5" compare EQ while being /=. build-lag relies on the structural Eq on
--- purpose, since any textual difference between git and the repo is worth
--- reporting
+-- | 'Eq' is structural but 'Ord' goes through rpmvercmp, so "1.05" and "1.5"
+-- compare EQ while being /=. build-lag relies on that, since any textual
+-- difference between git and the repo is worth reporting
 data EVR = EVR
   { evrEpoch :: !Int,
     evrVersion :: !Text,
@@ -39,14 +35,13 @@ data EVR = EVR
 instance Ord EVR where
   compare = compareEVR
 
--- | parse "[epoch:]version-release". a missing epoch or "(none)" means 0
 parseEVR :: Text -> Maybe EVR
 parseEVR raw = do
   let (epochPart, rest) = case T.breakOn ":" raw of
         (vr, "") -> ("0", vr)
         (e, r) -> (e, T.drop 1 r)
   epoch <- if epochPart == "(none)" then Just 0 else readMaybe (T.unpack epochPart)
-  -- release is everything after the *last* dash, versions can't contain dashes
+  -- versions can't contain dashes, so the release starts after the last one
   let (verDash, rel) = T.breakOnEnd "-" rest
   ver <- T.stripSuffix "-" verDash
   if T.null ver || T.null rel then Nothing else Just (EVR epoch ver rel)
@@ -59,8 +54,7 @@ compareEVR :: EVR -> EVR -> Ordering
 compareEVR (EVR e1 v1 r1) (EVR e2 v2 r2) =
   compare e1 e2 <> rpmvercmp v1 v2 <> rpmvercmp r1 r2
 
--- | compare two version (or release) strings exactly the way rpm does.
--- this is a line-by-line port of rpmvercmp.c
+-- | a line-by-line port of rpmvercmp.c
 --
 --   * anything that isn't an ascii letter, digit, '~' or '^' is a separator
 --   * '~' sorts before everything, even the end of the string (1.0~rc1 < 1.0)
@@ -81,17 +75,14 @@ rpmvercmp a b
           let one = T.dropWhile isSep one0
               two = T.dropWhile isSep two0
            in case (T.uncons one, T.uncons two) of
-                -- tilde: whoever has it is older
                 (Just ('~', one'), Just ('~', two')) -> go one' two'
                 (Just ('~', _), _) -> LT
                 (_, Just ('~', _)) -> GT
-                -- caret: older than anything except the end of the string
                 (Just ('^', one'), Just ('^', two')) -> go one' two'
                 (Nothing, Just ('^', _)) -> LT
                 (Just ('^', _), Nothing) -> GT
                 (Just ('^', _), Just _) -> LT
                 (Just _, Just ('^', _)) -> GT
-                -- one side ran out
                 (Nothing, Nothing) -> EQ
                 (Just _, Nothing) -> GT
                 (Nothing, Just _) -> LT
@@ -100,8 +91,6 @@ rpmvercmp a b
                   | otherwise -> segment False (T.span isAlpha one) (T.span isAlpha two)
 
     segment isNum (seg1, rest1) (seg2, rest2)
-      -- the other side has a different kind of segment here.
-      -- numeric beats alpha
       | T.null seg2 = if isNum then GT else LT
       | isNum =
           let n1 = T.dropWhile (== '0') seg1
@@ -122,22 +111,21 @@ rpmvercmp a b
 --     so "6.0.0-alpha1" becomes "6.0.0~alpha1"
 normalizeVersion :: Text -> Text
 normalizeVersion raw =
-  let t = T.takeWhileEnd (/= '/') (T.strip raw)
-      noV = maybe t id (T.stripPrefix "v" t)
-      fromDigit = case T.dropWhile (not . isDigit) noV of
-        "" -> noV
+  let afterLastSlash = T.takeWhileEnd (/= '/') (T.strip raw)
+      withoutV = fromMaybe afterLastSlash (T.stripPrefix "v" afterLastSlash)
+      fromFirstDigit = case T.dropWhile (not . isDigit) withoutV of
+        "" -> withoutV
         d -> d
-   in T.replace "-" "." (tildePre fromDigit)
+   in T.replace "-" "." (tildePrereleases fromFirstDigit)
 
--- | "-rc1" / ".beta" / "_alpha2" → "~rc1" / "~beta" / "~alpha2"
-tildePre :: Text -> Text
-tildePre t = case T.uncons t of
+tildePrereleases :: Text -> Text
+tildePrereleases t = case T.uncons t of
   Nothing -> ""
   Just (c, rest)
-    | c `elem` ("-._" :: String), Just _ <- marker rest -> T.cons '~' (tildePre rest)
-    | otherwise -> T.cons c (tildePre rest)
+    | c `elem` ("-._" :: String), startsWithPrerelease rest -> T.cons '~' (tildePrereleases rest)
+    | otherwise -> T.cons c (tildePrereleases rest)
   where
-    marker r = find (`T.isPrefixOf` T.toLower r) ["alpha", "beta", "rc", "pre", "dev"]
+    startsWithPrerelease r = any (`T.isPrefixOf` T.toLower r) ["alpha", "beta", "rc", "pre", "dev"]
 
 -- | compare an upstream version with a spec Version, forgiving the usual
 -- ways packagers respell a version. returns how upstream compares to the spec
@@ -152,23 +140,20 @@ tildePre t = case T.uncons t of
 --   * otherwise rpmvercmp decides
 compareUpstream :: Text -> Text -> Ordering
 compareUpstream up spec
-  | squash u == squash s || squash u == squash (snapshotBase s) = EQ
-  | not (T.null (core u)) && core u == core s && not (isPre u || isPre s) = EQ
+  | sameAlnums = EQ
+  | sameLeadingNumber && not (isPrerelease u || isPrerelease s) = EQ
   | otherwise = rpmvercmp u s
   where
     u = normalizeVersion up
     s = normalizeVersion spec
-    squash = T.toLower . T.filter isAlphaNum
-    core = T.dropWhileEnd (== '.') . T.takeWhile (\c -> isDigit c || c == '.')
-    -- a prerelease is never "the same version with junk after it"
-    isPre v = "~" `T.isPrefixOf` T.drop (T.length (core v)) (T.dropWhileEnd (== '.') v)
+    sameAlnums = alnums u `elem` [alnums s, alnums (snapshotBase s)]
+    sameLeadingNumber = not (T.null (leadingNumber u)) && leadingNumber u == leadingNumber s
+    alnums = T.toLower . T.filter isAlphaNum
+    leadingNumber = T.dropWhileEnd (== '.') . T.takeWhile (\c -> isDigit c || c == '.')
+    isPrerelease v = "~" `T.isPrefixOf` T.drop (T.length (leadingNumber v)) (T.dropWhileEnd (== '.') v)
 
--- | a version with its snapshot suffix cut off: everything from a '^', or
--- from a git marker like ".git" or "+git". not "~git", since that's a
--- snapshot from before the release, so 2.0~git... really is behind 2.0
---
--- >>> snapshotBase "2.0.0~alpha~1~20250926.gitfc62ae7"
--- "2.0.0~alpha~1~20250926"
+-- | "~git" isn't a snapshot marker, since 2.0~git... is a snapshot from
+-- before the release and really is behind 2.0
 snapshotBase :: Text -> Text
 snapshotBase v =
   let base = T.takeWhile (/= '^') v

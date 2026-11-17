@@ -11,7 +11,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.Containers.ListUtils (nubOrd)
 import Data.List (nub)
-import Data.Maybe (isNothing)
+import Data.Maybe (fromMaybe, isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime, getCurrentTime)
@@ -34,16 +34,21 @@ import System.Exit (ExitCode (..), exitWith)
 import System.FilePath ((</>))
 import System.IO (hPutStrLn, hSetEncoding, stderr, stdout)
 
--- | exit codes, so cron jobs and CI can tell "found problems" apart from
--- "couldn't run"
 exitFindings, exitUsage :: ExitCode
 exitFindings = ExitFailure 1
 exitUsage = ExitFailure 2
 
+data ConfigInputs = ConfigInputs
+  { ciGitHubToken :: Maybe Text,
+    ciCores :: Int,
+    ciRunStart :: UTCTime,
+    ciSpecRef :: Maybe Text,
+    ciDistro :: Distro,
+    ciRelease :: Release
+  }
+
 data Opts = Opts
-  { -- | token, cores, run start, spec ref, distro, release
-    optConfig :: Maybe Text -> Int -> UTCTime -> Maybe Text -> Distro -> Release -> Config,
-    -- | Nothing means tell from the checkout
+  { optConfig :: ConfigInputs -> Config,
     optDistro :: Maybe Distro,
     optReleases :: [ReleaseArg],
     optRemote :: Text,
@@ -52,7 +57,6 @@ data Opts = Opts
     optOnly :: [Text],
     optFormat :: Format,
     optMinSev :: Severity,
-    -- | Nothing means never fail on findings
     optFailOn :: Maybe Severity,
     optIgnoreFile :: Maybe FilePath,
     optNoIgnores :: Bool
@@ -93,7 +97,7 @@ optsP = do
       "never" -> Right Nothing
       other -> Left ("unknown level " <> show other <> ", expected error, warn, info or never")
 
-configP :: Parser (Maybe Text -> Int -> UTCTime -> Maybe Text -> Distro -> Release -> Config)
+configP :: Parser (ConfigInputs -> Config)
 configP = do
   cfgMonorepo <- strOption (long "monorepo" <> short 'm' <> metavar "DIR" <> value "." <> showDefault <> help "checkout of terrapkg/packages, terrapkg/packages-el, Ultramarine-Linux/packages or terrapkg/tuatara")
   base <- switch (long "base" <> long "fedora" <> help "also check for overlap with the base distro's repos: Fedora's release and updates (~60MB per release), AlmaLinux and EPEL for el releases, or openSUSE Tumbleweed's oss and update")
@@ -102,9 +106,12 @@ configP = do
   cfgUpstream <- switch (long "upstream" <> short 'u' <> help "query upstream APIs for version drift")
   cacheHours <- option auto (long "cache-hours" <> metavar "N" <> value (6 :: Int) <> showDefault <> help "reuse upstream answers younger than this, 0 to always refetch")
   jobs <- optional (option auto (long "jobs" <> short 'j' <> metavar "N" <> help "parallel jobs (default: number of cores)"))
-  pure $ \cfgGitHubToken cores cfgRunStart cfgSpecRef distro rel ->
+  pure $ \ConfigInputs {ciDistro = distro, ciRelease = rel, ..} ->
     Config
-      { cfgRoot = distroRoot distro,
+      { cfgGitHubToken = ciGitHubToken,
+        cfgRunStart = ciRunStart,
+        cfgSpecRef = ciSpecRef,
+        cfgRoot = distroRoot distro,
         cfgRepoName = repoName distro rel,
         cfgRepoUrl = repoUrlFor (distroRepoUrl distro) rel,
         cfgSubrepos = releaseSubrepos distro rel,
@@ -116,15 +123,12 @@ configP = do
         cfgRolling = isRolling rel,
         cfgStaleAfter = fromIntegral (staleDays * 86400),
         cfgCacheFor = fromIntegral (cacheHours * 3600),
-        cfgConcurrency = maybe cores id jobs,
+        cfgConcurrency = fromMaybe ciCores jobs,
         ..
       }
 
--- | turn --release arguments into releases. with none, a Fedora-based
--- distro checks every release Bodhi says is maintained, an EL-based one
--- every elN branch the remote has (Bodhi lists EPEL releases Terra doesn't
--- build), and an openSUSE-based one tumbleweed. a Fedora-based distro
--- only checks EL when asked
+-- | EL releases come from the remote's elN branches, not Bodhi, which lists
+-- EPEL releases Terra doesn't build
 resolveReleases :: FilePath -> Text -> Distro -> (Release -> Config) -> [ReleaseArg] -> IO [Release]
 resolveReleases mono remote distro mk args
   | null args = case distroBases distro of
@@ -148,7 +152,7 @@ resolveReleases mono remote distro mk args
           Right rels | r : _ <- filter isRolling rels -> pure r
           Right _ -> runError "Bodhi didn't list a rawhide release"
           Left e -> runError ("can't ask Bodhi for rawhide's version: " <> e <> ". pass numbered releases instead")
-    bodhi = askBodhiPatiently (mk (Release Fedora "rawhide" 0))
+    bodhi = askBodhiPatiently (mk anyRelease)
     runError msg = hPutStrLn stderr ("oglyad: " <> T.unpack msg) >> exitWith exitUsage
 
 remoteBranches :: FilePath -> Text -> IO [Text]
@@ -194,9 +198,8 @@ askBodhi cfg = do
     Left (RateLimited e) -> Left e
     Right b -> parseBodhiReleases b
 
--- | GITHUB_TOKEN, or whatever the gh cli is logged in with. oglyad itself
--- only sends it to api.github.com. the one child process that gets it is
--- anda (see Oglyad.Source.Anda), since its GitHub helpers need it
+-- | oglyad only sends this to api.github.com. the one child process that gets
+-- it is anda, since its GitHub helpers need it
 githubToken :: IO (Maybe Text)
 githubToken =
   lookupEnv "GITHUB_TOKEN" >>= \case
@@ -205,7 +208,6 @@ githubToken =
   where
     nonEmpty t = if T.null t then Nothing else Just t
 
--- | like execParser, but bad arguments exit with 'exitUsage' instead of 1
 parseOpts :: IO Opts
 parseOpts = do
   args <- getArgs
@@ -216,16 +218,11 @@ parseOpts = do
           (fullDesc <> progDesc "repository metadata and health checker for Terra and other anda monorepos")
   case execParserPure defaultPrefs pinfo args of
     Failure f -> case renderFailure f prog of
-      -- --help and --version are output, not errors, so they go to stdout
-      -- (help2man and friends read them from there)
+      -- help2man and friends read --help and --version from stdout
       (msg, ExitSuccess) -> putStrLn msg >> exitWith ExitSuccess
       (msg, _) -> hPutStrLn stderr msg >> exitWith exitUsage
     other -> handleParseResult other
 
--- | the distro asked for, or the one whose marker directory the checkout
--- has. distros sharing a marker, like terrapkg/packages and packages-el,
--- are told apart by the remote's repo name. a checkout that still matches
--- none, or more than one, has to say
 pickDistro :: FilePath -> Text -> Maybe Distro -> IO Distro
 pickDistro mono remote asked = do
   found <- filterM (doesDirectoryExist . (mono </>) . distroMarker) distros
@@ -247,13 +244,22 @@ pickDistro mono remote asked = do
 usageError :: String -> IO a
 usageError msg = hPutStrLn stderr ("oglyad: " <> msg) >> exitWith exitUsage
 
-main :: IO ()
-main = do
-  -- cron and CI often run under LANG=C. specs, anda.hcl and rpmspec errors
-  -- contain non-ascii text, which would crash text IO in a C locale
+-- | cron and CI often run under LANG=C, where the non-ascii text in specs,
+-- anda.hcl and rpmspec errors would crash text IO
+useUtf8Everywhere :: IO ()
+useUtf8Everywhere = do
   mapM_ ($ utf8) [setLocaleEncoding, setFileSystemEncoding, setForeignEncoding]
   mapM_ (`hSetEncoding` utf8) [stdout, stderr]
 
+anyRelease :: Release
+anyRelease = Release Fedora "rawhide" 0
+
+namesOneRepo :: Text -> Bool
+namesOneRepo url = not (any (`T.isInfixOf` url) ["{repo}", "{release}"])
+
+main :: IO ()
+main = do
+  useUtf8Everywhere
   Opts {..} <- parseOpts
   ignores <- case optIgnoreFile of
     Nothing -> pure (IgnoreFile [])
@@ -264,17 +270,18 @@ main = do
         Right bytes -> either (\e -> usageError (path <> ": " <> e)) pure (parseIgnoreFile checkNames bytes)
   when (optWorktree && length optReleases /= 1) $
     usageError "--worktree checks the working tree against one release, so it needs exactly one --release"
-  when (maybe False (\url -> not (any (`T.isInfixOf` url) ["{repo}", "{release}"])) optRepo && length optReleases /= 1) $
+  when (maybe False namesOneRepo optRepo && length optReleases /= 1) $
     usageError "--repo without {repo} or {release} in it names one repo, so it needs exactly one --release"
   token <- githubToken
   cores <- getNumProcessors
   start <- getCurrentTime
-  let mono = cfgMonorepo (optConfig token cores start Nothing terra (Release Fedora "rawhide" 0))
+  let configFor specRef distro rel = optConfig (ConfigInputs token cores start specRef distro rel)
+      mono = cfgMonorepo (configFor Nothing terra anyRelease)
   distro <- pickDistro mono optRemote optDistro
-  let baseCfg = optConfig token cores start Nothing distro (Release Fedora "rawhide" 0)
+  let baseCfg = configFor Nothing distro anyRelease
   let specRef rel = if optWorktree then Nothing else Just (optRemote <> "/" <> releaseBranch distro rel)
       mkCfg rel =
-        let c = optConfig token cores start (specRef rel) distro rel
+        let c = configFor (specRef rel) distro rel
          in maybe c (\url -> c {cfgRepoUrl = repoUrlFor url rel}) optRepo
   releases <- resolveReleases mono optRemote distro mkCfg optReleases
 
@@ -294,14 +301,12 @@ main = do
           | otherwise = applyIgnores checkNames ran ignores (snapIgnoreLabels snap) findings
         relInfo = ReleaseInfo (relName rel) (releaseLabel rel) (cfgSpecRef cfg) (snapHead snap) (repoUrl cfg Nothing)
     pure (rel, relInfo, applied)
-  -- extracted trees for commits nothing checks anymore are just disk space
   unless optWorktree $
     pruneTrees [c | (_, ReleaseInfo {riCommit = Just c}, _) <- perRelease]
 
   now <- getCurrentTime
   let merged f = mergeFindings distro [(rel, f a) | (rel, _, a) <- perRelease]
-      -- an ignore entry is only unused if no release needed it
-      unused = [f | f <- merged apUnused, length (fReleases f) == length releases]
+      unusedInEveryRelease = [f | f <- merged apUnused, length (fReleases f) == length releases]
       report =
         Report
           { rVersion = oglyadVersion,
@@ -309,7 +314,7 @@ main = do
             rReleases = [ri | (_, ri, _) <- perRelease],
             rDistro = distroName distro,
             rUpstream = any (\(rel, _, _) -> cfgUpstream (mkCfg rel)) perRelease,
-            rFindings = merged apKept <> merged apProblems <> unused,
+            rFindings = merged apKept <> merged apProblems <> unusedInEveryRelease,
             rIgnored = merged apIgnored
           }
   LBS.putStr (render optFormat optMinSev report)

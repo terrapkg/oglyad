@@ -23,7 +23,6 @@ import Data.Time (NominalDiffTime, UTCTime)
 import GHC.Generics (Generic)
 import Oglyad.Version (EVR (..))
 
--- | which version field of a crate anda reads
 data CrateField
   = -- | crates()
     MaxStable
@@ -34,21 +33,16 @@ data CrateField
   deriving stock (Eq, Ord, Show, Read, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
--- | where a package's upstream version comes from, recovered from update.rhai.
--- constructors mirror the andax helpers in FyraLabs/anda (andax/fns/tsunagu.rs)
+-- | mirrors the andax helpers in FyraLabs/anda (andax/fns/tsunagu.rs)
 data UpstreamSource
-  = -- | gh("owner/repo"), latest release
-    GitHub Text
-  | -- | gh_tag("owner/repo"), newest tag
-    GitHubTag Text
-  | -- | gitlab([domain,] id), latest release
+  = GitHub Text
+  | GitHubTag Text
+  | -- | domain, project id
     GitLab Text Text
-  | -- | gitlab_tag([domain,] id)
-    GitLabTag Text Text
-  | -- | gitea(host, repo) and codeberg(repo)
+  | GitLabTag Text Text
+  | -- | host, repo. codeberg() lands here too
     Gitea Text Text
-  | -- | gitea_tag(host, repo) and codeberg_tag(repo)
-    GiteaTag Text Text
+  | GiteaTag Text Text
   | PyPI Text
   | Crates CrateField Text
   | Npm Text
@@ -59,21 +53,17 @@ data UpstreamSource
   | Opam Text
   | -- | namespace, collection
     AnsibleGalaxy Text Text
-  | -- | newest tag of any git remote (sourcehut, tangled)
-    GitTags Text
+  | GitTags Text
   | -- | follows another distro or package (bodhi, madoguchi, nvidia), not upstream
     Derived Text
-  | -- | follows a branch head (gh_commit and friends), no version to compare
+  | -- | follows a branch head (gh_commit and friends), so there's no version to compare
     CommitTracked
-  | -- | never sets anything the spec's Version: is built from. it only bumps
-    -- Release (say, to rebuild when something else changes) or writes files
+  | -- | the script only bumps Release or writes files, never the Version: inputs
     NoVersion
-  | -- | raw update.rhai we couldn't make sense of
-    Unknown Text
+  | Unknown Text
   deriving stock (Eq, Ord, Show, Read, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
--- | what Terra's published repodata says about a source package
 data RepoBuild = RepoBuild
   { rbEVR :: EVR,
     rbBuildTime :: UTCTime
@@ -81,37 +71,30 @@ data RepoBuild = RepoBuild
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
--- | one source package, merged from every data source we know about
 data Package = Package
   { pkgName :: Text,
     -- | relative to the monorepo, e.g. anda/devs/zed/stable
     pkgPath :: FilePath,
-    -- | Terra subrepo from anda.hcl labels, e.g. "extras"
+    -- | from the anda.hcl labels
     pkgSubrepo :: Maybe Text,
-    -- | a `nightly` or `quaterdaily` label in anda.hcl: built from a branch
-    -- head on a schedule, not from releases
+    -- | a `nightly` or `quaterdaily` label: built from a branch head, not releases
     pkgNightly :: Bool,
     pkgUpdBranch :: Bool,
-    -- | the spec file, relative to the tree it was read from
+    -- | relative to the tree it was read from
     pkgSpecPath :: Maybe FilePath,
-    -- | hash of everything in the package dir that can change what rpmspec
-    -- says, plus the dist and macros. keys caches of anda runs
+    -- | hash of everything that can change what rpmspec says, keying the anda
+    -- run caches
     pkgFingerprint :: Text,
-    -- | what's merged in git
     pkgSpecEVR :: Maybe EVR,
-    -- | what's actually published
     pkgRepoBuild :: Maybe RepoBuild,
     pkgLastCommit :: Maybe UTCTime,
     -- | Nothing means no update.rhai
     pkgUpstream :: Maybe UpstreamSource,
-    -- | the update.rhai itself, for replaying it against the upstream value
     pkgRhai :: Maybe Text,
-    -- | only filled in when upstream lookups ran
+    -- | only filled in with --upstream
     pkgUpstreamVer :: Maybe Text,
-    -- | why the upstream lookup failed, if it did
     pkgUpstreamErr :: Maybe Text,
-    -- | whether the repo this package publishes to was fetched. when it
-    -- wasn't, pkgRepoBuild = Nothing means "unknown", not "never published"
+    -- | when False, pkgRepoBuild = Nothing means "unknown", not "never published"
     pkgRepoChecked :: Bool
   }
   deriving stock (Eq, Show)
@@ -128,19 +111,16 @@ instance ToJSON Severity where
 data Finding = Finding
   { fCheck :: Text,
     fPackage :: Text,
-    -- | the package's directory in the monorepo. package names aren't unique
-    -- (see the duplicate-name check), so this is what identifies it
+    -- | package names aren't unique, the monorepo path is
     fPath :: Maybe Text,
     fSeverity :: Severity,
     fMessage :: Text,
-    -- | the releases this showed up in, by name ("43", "rawhide"). empty
-    -- until the run stamps it
+    -- | release names ("43", "rawhide"), empty until the run stamps them
     fReleases :: [Text]
   }
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON)
 
--- | a finding about a package
 finding :: Text -> Package -> Severity -> Text -> Finding
 finding check p sev msg =
   Finding
@@ -153,47 +133,34 @@ finding check p sev msg =
     }
 
 data Config = Config
-  { -- | local checkout of terrapkg/packages, or another anda monorepo
-    cfgMonorepo :: FilePath,
-    -- | the directory in it holding every package, e.g. anda
+  { cfgMonorepo :: FilePath,
     cfgRoot :: FilePath,
-    -- | git ref to read specs from, e.g. origin/f43. Nothing reads the
-    -- working tree of cfgMonorepo as it is
+    -- | Nothing reads the working tree as it is
     cfgSpecRef :: Maybe Text,
-    -- | the monorepo branch name, f43 or frawhide. update.rhai
-    -- scripts see it as labels.branch
+    -- | update.rhai scripts see it as labels.branch
     cfgBranch :: Text,
     cfgRolling :: Bool,
-    -- | the main repo's name, e.g. terra44
     cfgRepoName :: Text,
-    -- | where it is: a metalink or a base url, with {repo} where the repo
-    -- name goes. without {repo} it's the main repo's url, and subrepos add
-    -- -extras to the end of it
+    -- | a metalink or base url with {repo} where the repo name goes. without
+    -- {repo} it's the main repo's url, and subrepos append -extras and so on
     cfgRepoUrl :: Text,
     cfgSubrepos :: Bool,
-    -- | repo base urls to check for overlap
     cfgBaseRepos :: [Text],
     cfgBaseName :: Text,
-    -- | macros defined (Just) or undefined (Nothing) when evaluating specs,
-    -- e.g. dist .fc44 and fedora 44
+    -- | Nothing undefines the macro
     cfgMacros :: [(Text, Maybe Text)],
     cfgCacheTag :: Text,
     cfgStaleAfter :: NominalDiffTime,
-    -- | whether to hit upstream APIs at all
     cfgUpstream :: Bool,
-    -- | reuse cached upstream answers younger than this
     cfgCacheFor :: NominalDiffTime,
-    -- | when this oglyad run started. upstream answers fetched since then are
-    -- reused whatever cfgCacheFor says, so checking four releases asks each
-    -- upstream once
+    -- | upstream answers fetched since this are reused whatever cfgCacheFor
+    -- says, so checking several releases asks each upstream once
     cfgRunStart :: UTCTime,
-    -- | parallel jobs, defaults to the number of cores
     cfgConcurrency :: Int,
     cfgGitHubToken :: Maybe Text
   }
   deriving stock (Show)
 
--- | the url of the main repo, or of a subrepo like extras
 repoUrl :: Config -> Maybe Text -> Text
 repoUrl Config {..} sub
   | "{repo}" `T.isInfixOf` cfgRepoUrl = T.replace "{repo}" (cfgRepoName <> suffix) cfgRepoUrl
@@ -201,18 +168,15 @@ repoUrl Config {..} sub
   where
     suffix = maybe "" ("-" <>) sub
 
--- | everything a check is allowed to look at, already collected.
--- checks never do IO, which is what keeps them trivially testable
+-- | everything a check may look at. checks never do IO, which keeps them
+-- trivially testable
 data Snapshot = Snapshot
   { -- | keyed by monorepo path, since names can repeat
     snapPackages :: Map FilePath Package,
-    -- | source package names present in the base distro
     snapBase :: Set Text,
     snapNow :: UTCTime,
     snapConfig :: Config,
-    -- | the monorepo commit this run looked at
     snapHead :: Maybe Text,
-    -- | check names each package dir's anda.hcl asks to ignore
     snapIgnoreLabels :: Map FilePath [Text]
   }
 

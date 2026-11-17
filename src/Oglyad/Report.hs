@@ -1,5 +1,3 @@
--- | rendering findings as terminal text, json for scripts, or markdown for
--- GitHub job summaries
 module Oglyad.Report
   ( Report (..),
     ReleaseInfo (..),
@@ -26,26 +24,22 @@ import Oglyad.Types
 data Format = Text | Json | Markdown
   deriving stock (Eq, Show)
 
--- | everything a report needs besides the findings themselves
 data Report = Report
   { rVersion :: Text,
     rGenerated :: UTCTime,
-    -- | every release this run checked, in order
     rReleases :: [ReleaseInfo],
-    -- | "terra", "ultramarine"
     rDistro :: Text,
     rUpstream :: Bool,
     rFindings :: [Finding],
     rIgnored :: [Finding]
   }
 
--- | what one release was checked against
 data ReleaseInfo = ReleaseInfo
-  { -- | "43", "rawhide", as findings' fReleases spell it
+  { -- | "43", as fReleases spells it
     riName :: Text,
-    -- | "f43", "rawhide", for people
+    -- | "f43", for people
     riLabel :: Text,
-    -- | the git ref the specs came from, Nothing for the working tree
+    -- | Nothing for the working tree
     riRef :: Maybe Text,
     riCommit :: Maybe Text,
     riRepo :: Text
@@ -59,8 +53,6 @@ render fmt minSev r = case fmt of
   where
     utf8 = LBS.fromStrict . TE.encodeUtf8
 
--- * text
-
 renderText :: Severity -> Report -> Text
 renderText minSev r@Report {..} =
   T.unlines (map line (shown minSev rFindings) <> ["", summaryLine rFindings rIgnored])
@@ -69,7 +61,7 @@ renderText minSev r@Report {..} =
     line f@Finding {..} =
       T.justifyLeft 6 ' ' (sevText fSeverity)
         <> T.justifyLeft 16 ' ' fCheck
-        <> label amb f
+        <> packageLabel amb f
         <> releaseTag r f
         <> ": "
         <> fMessage
@@ -81,15 +73,16 @@ summaryLine fs ignored =
     count s = tshow (length (filter ((== s) . fSeverity) fs))
     ignoredPart = if null ignored then "" else " (" <> tshow (length ignored) <> " ignored)"
 
--- * json
+-- | bump on any breaking change to field names or meanings, so scripts reading
+-- the json can tell
+schemaVersion :: Int
+schemaVersion = 2
 
--- | a stable envelope. bump schema on any breaking change to field names or
--- meanings, so scripts reading this can tell
 renderJson :: Report -> LBS.ByteString
 renderJson Report {..} =
   encode $
     object
-      [ "schema" .= (2 :: Int),
+      [ "schema" .= schemaVersion,
         "oglyad" .= rVersion,
         "generated" .= rGenerated,
         "distro" .= rDistro,
@@ -127,10 +120,7 @@ renderJson Report {..} =
           "releases" .= fReleases
         ]
 
--- * markdown
-
--- | sized for a GitHub job summary: counts first, errors and warnings in
--- full, info folded away
+-- | sized for a GitHub job summary, so info is folded away
 renderMarkdown :: Severity -> Report -> Text
 renderMarkdown minSev r@Report {..} =
   T.unlines $
@@ -168,35 +158,28 @@ renderMarkdown minSev r@Report {..} =
           let heading = title <> " (" <> tshow (length fs) <> ")"
               table =
                 ["", "| package | check | message |", "|---|---|---|"]
-                  <> [ "| " <> cell (label amb f <> releaseTag r f) <> " | `" <> fCheck f <> "` | " <> cell (fMessage f) <> " |"
+                  <> [ "| " <> escapeCell (packageLabel amb f <> releaseTag r f) <> " | `" <> fCheck f <> "` | " <> escapeCell (fMessage f) <> " |"
                      | f <- fs
                      ]
            in if folded
                 then ["", "<details><summary>" <> heading <> "</summary>"] <> table <> ["", "</details>"]
                 else ["", "## " <> heading] <> table
-    -- table cells can't contain raw pipes or newlines
-    cell = T.replace "|" "\\|" . T.replace "\n" " "
-
--- * shared
+    escapeCell = T.replace "|" "\\|" . T.replace "\n" " "
 
 shown :: Severity -> [Finding] -> [Finding]
 shown minSev =
   sortOn (\f -> (Down (fSeverity f), fCheck f, fPackage f)) . filter ((>= minSev) . fSeverity)
 
--- | the package name, plus its directory when the name belongs to several
-label :: Set.Set Text -> Finding -> Text
-label ambiguous Finding {..} =
+packageLabel :: Set.Set Text -> Finding -> Text
+packageLabel ambiguous Finding {..} =
   fPackage <> maybe "" (\path -> if fPackage `Set.member` ambiguous then " (" <> path <> ")" else "") fPath
 
--- | " [f43, f44]" for a finding that only some of the checked releases
--- have. nothing when it's in all of them, or only one release was checked
 releaseTag :: Report -> Finding -> Text
 releaseTag Report {rReleases} Finding {fReleases}
   | length rReleases <= 1 = ""
   | all (`elem` fReleases) (map riName rReleases) = ""
   | otherwise = " [" <> T.intercalate ", " [riLabel ri | ri <- rReleases, riName ri `elem` fReleases] <> "]"
 
--- | names that show up with more than one directory
 ambiguousNames :: [Finding] -> Set.Set Text
 ambiguousNames fs =
   Map.keysSet . Map.filter ((> 1) . Set.size) $

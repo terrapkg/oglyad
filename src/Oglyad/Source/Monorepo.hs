@@ -1,4 +1,3 @@
--- | reads a local checkout of terrapkg/packages, or another anda monorepo
 module Oglyad.Source.Monorepo
   ( PkgDir (..),
     SpecInfo (..),
@@ -42,24 +41,14 @@ import System.Directory (createDirectory, createDirectoryIfMissing, doesDirector
 import System.FilePath (takeDirectory, takeExtension, (</>))
 import System.IO (hClose, openBinaryTempFile)
 
--- | a directory with an anda.hcl in it
 data PkgDir = PkgDir
-  { -- | relative to the monorepo root
+  { -- | relative to the monorepo root, like pdSpec
     pdPath :: FilePath,
-    -- | relative to the monorepo root
     pdSpec :: Maybe FilePath,
-    -- | `subrepo = "extras"` from the labels block
     pdSubrepo :: Maybe Text,
-    -- | file contents
     pdUpdateRhai :: Maybe Text,
-    -- | macros the spec's Version: line uses, like ["tag"] for
-    -- `Version: %(echo %tag | sed ...)`. Nothing when there's no spec or no
-    -- Version: line to read
     pdVersionMacros :: Maybe [Text],
-    -- | `oglyad_ignore = "check, other-check"` from the labels block
     pdIgnores :: [Text],
-    -- | has a `nightly = N` or `quaterdaily = N` label, so it builds from a
-    -- branch head on a schedule rather than from releases
     pdNightly :: Bool,
     pdUpdBranch :: Bool,
     pdArches :: [Text]
@@ -73,10 +62,7 @@ data SpecInfo = SpecInfo
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
--- | walk the package dir (anda/ in terrapkg/packages) and return every
--- project directory. a directory that can't be read comes back as a Left
--- with the reason, instead of ending the walk. symlinked directories aren't
--- followed, so a link loop can't hang the walk
+-- | symlinked directories aren't followed, so a link loop can't hang the walk
 findPackageDirs :: FilePath -> FilePath -> IO [Either (FilePath, Text) PkgDir]
 findPackageDirs root pkgRoot = go pkgRoot
   where
@@ -88,7 +74,7 @@ findPackageDirs root pkgRoot = go pkgRoot
         Right entries -> do
           hasHcl <- doesFileExist (abs' </> "anda.hcl")
           here <- if hasHcl && not (null rel) then pure <$> readPkgDir rel entries else pure []
-          subdirs <- filterM (realDir . (abs' </>)) [e | e <- sort entries, take 1 e /= "."]
+          subdirs <- filterM (nonSymlinkDir . (abs' </>)) [e | e <- sort entries, take 1 e /= "."]
           nested <- concat <$> forM subdirs (go . (rel </>))
           pure (here <> nested)
 
@@ -98,14 +84,14 @@ findPackageDirs root pkgRoot = go pkgRoot
 
     readPkgDir' rel entries = do
       let abs' = root </> rel
-      hcl <- readText (abs' </> "anda.hcl")
+      hcl <- readUtf8Lenient (abs' </> "anda.hcl")
       let fromHcl = T.unpack <$> hclString "spec" hcl
           fallback = listToMaybe [e | e <- entries, takeExtension e == ".spec"]
       hasRhai <- doesFileExist (abs' </> "update.rhai")
-      rhai <- if hasRhai then Just <$> readText (abs' </> "update.rhai") else pure Nothing
+      rhai <- if hasRhai then Just <$> readUtf8Lenient (abs' </> "update.rhai") else pure Nothing
       let spec = maybe fallback Just fromHcl
       specText <- case spec of
-        Just f -> either (\(_ :: IOException) -> Nothing) Just <$> try (readText (abs' </> f))
+        Just f -> either (\(_ :: IOException) -> Nothing) Just <$> try (readUtf8Lenient (abs' </> f))
         Nothing -> pure Nothing
       pure
         PkgDir
@@ -120,10 +106,8 @@ findPackageDirs root pkgRoot = go pkgRoot
             pdArches = hclList "arches" hcl
           }
 
--- | the macro names a spec's Version: line refers to, read from the raw
--- text: %name, %{name}, %{?name} and %{!?name:...} all count. rpmspec
--- would expand them away, and what we want is which ones an update.rhai
--- would have to set to change the version
+-- | read from the raw text, since rpmspec would expand away the macros an
+-- update.rhai has to set to change the version
 versionMacros :: Text -> Maybe [Text]
 versionMacros spec = case [T.strip v | l <- T.lines spec, Just v <- [stripTag l]] of
   v : _ -> Just (names v)
@@ -139,8 +123,8 @@ versionMacros spec = case [T.strip v | l <- T.lines spec, Just v <- [stripTag l]
             (name, more) = T.span (\c -> isAlphaNum c || c == '_') after
          in [name | not (T.null name)] <> names more
 
--- | the value of `key = "value"` (or a bare `key = 1`) anywhere in an
--- anda.hcl. good enough for the flat labels and rpm blocks anda uses
+-- | not a real HCL parser, but good enough for the flat labels and rpm
+-- blocks anda uses
 hclString :: Text -> Text -> Maybe Text
 hclString key hcl =
   listToMaybe
@@ -166,23 +150,20 @@ hclList key hcl =
       let inside = T.takeWhile (/= ']') opened
     ]
 
--- | a directory that isn't a symlink
-realDir :: FilePath -> IO Bool
-realDir path = do
+nonSymlinkDir :: FilePath -> IO Bool
+nonSymlinkDir path = do
   isDir <- doesDirectoryExist path
   isLink <- either (\(_ :: IOException) -> False) id <$> try (pathIsSymbolicLink path)
   pure (isDir && not isLink)
 
--- | read a text file as utf-8 no matter the locale, replacing invalid bytes
--- instead of failing
-readText :: FilePath -> IO Text
-readText path = TE.decodeUtf8Lenient <$> BS.readFile path
+readUtf8Lenient :: FilePath -> IO Text
+readUtf8Lenient path = TE.decodeUtf8Lenient <$> BS.readFile path
 
--- | let rpm evaluate the spec for us. hand-parsing specs means reimplementing
--- the macro engine, which is a terrible idea
+-- | rpm evaluates the spec, since hand-parsing specs would mean
+-- reimplementing its macro engine
 querySpec :: [(Text, Maybe Text)] -> FilePath -> IO (Either Text SpecInfo)
 querySpec macros spec = do
-  let qf = "%{NAME}\t%|EPOCH?{%{EPOCH}}:{0}|:%{VERSION}-%{RELEASE}\n"
+  let nameAndEVR = "%{NAME}\t%|EPOCH?{%{EPOCH}}:{0}|:%{VERSION}-%{RELEASE}\n"
   out <-
     run "rpmspec" $
       ["-q", "--srpm"]
@@ -191,7 +172,7 @@ querySpec macros spec = do
              "--define",
              "_sourcedir " <> takeDirectory spec,
              "--qf",
-             qf,
+             nameAndEVR,
              spec
            ]
   pure $ do
@@ -205,14 +186,10 @@ macroArgs = \case
   (name, Just body) -> ["--define", T.unpack name <> " " <> T.unpack body]
   (name, Nothing) -> ["--undefine", T.unpack name]
 
--- | time of the last commit touching each package dir, from a single
--- `git log` over the whole history.
---
--- asking git once per directory (`git log -1 -- dir`) makes it walk and diff
--- history from the top every time, which for 1300 dirs and 20k commits burned
--- ~25s of cpu. one pass listing every changed file per commit takes ~0.5s,
--- and since git lists newest commits first, the first time we see a path
--- under a dir is that dir's last commit
+-- | one `git log` over the whole history instead of `git log -1 -- dir` per
+-- directory, which walks history from the top every time (~25s of cpu for
+-- 1300 dirs vs ~0.5s). git lists newest commits first, so the first time a
+-- path under a dir shows up is that dir's last commit
 lastCommits :: FilePath -> FilePath -> Text -> [FilePath] -> IO (Map FilePath UTCTime)
 lastCommits root pkgRoot ref dirs = do
   out <-
@@ -222,8 +199,8 @@ lastCommits root pkgRoot ref dirs = do
   pure (either (const Map.empty) (go Nothing Map.empty . T.lines) out)
   where
     wanted = Set.fromList (map T.pack dirs)
-    total = Set.size wanted
-    go _ acc _ | Map.size acc == total = acc -- every dir seen, stop reading
+    everyDirSeen acc = Map.size acc == Set.size wanted
+    go _ acc _ | everyDirSeen acc = acc
     go _ acc [] = acc
     go cur acc (l : ls) = case T.stripPrefix "@" l of
       -- unix seconds. iso dates would need care since git writes UTC as "Z",
@@ -240,14 +217,11 @@ lastCommits root pkgRoot ref dirs = do
       ("", _) -> []
       (parentSlash, _) -> let parent = T.dropEnd 1 parentSlash in parent : ancestors parent
 
--- | the commit HEAD points at, if this is a git checkout
 headCommit :: FilePath -> IO (Maybe Text)
 headCommit root = either (const Nothing) (Just . T.strip) <$> run "git" ["-C", root, "rev-parse", "HEAD"]
 
--- | the whole tree of a git ref, extracted under the cache dir and keyed by
--- commit, so each commit gets extracted once. the checkout itself is never
--- touched: no checkout, no worktree, no fetch. returns the directory and the
--- commit
+-- | extracts into the cache once per commit, so the checkout itself is never
+-- touched (no checkout, worktree or fetch)
 checkoutRef :: FilePath -> Text -> IO (Either Text (FilePath, Text))
 checkoutRef mono ref = do
   rev <- run "git" ["-C", mono, "rev-parse", "--verify", "--quiet", T.unpack ref <> "^{commit}"]
@@ -292,9 +266,8 @@ checkoutRef mono ref = do
     try' :: IO () -> IO ()
     try' act = () <$ (try act :: IO (Either SomeException ()))
 
--- | delete extracted trees nothing has used in a week, other than these.
--- a week rather than right away, so checking one release doesn't throw out
--- the trees the next full run needs
+-- | trees are kept for a while after their last use, so checking one release
+-- doesn't throw out the trees the next full run needs
 pruneTrees :: [Text] -> IO ()
 pruneTrees keep = do
   trees <- (</> "trees") <$> cacheDir
@@ -307,27 +280,27 @@ pruneTrees keep = do
       used <- try (getModificationTime path) :: IO (Either IOException UTCTime)
       case used of
         Right t
-          | length n == 40,
+          | isCommitSha n,
             T.pack n `notElem` keep,
-            diffUTCTime now t > 7 * nominalDay ->
+            diffUTCTime now t > keepUnusedFor ->
               () <$ (try (removePathForcibly path) :: IO (Either IOException ()))
         _ -> pure ()
+  where
+    isCommitSha n = length n == 40
+    keepUnusedFor = 7 * nominalDay
 
--- | a hash of everything that can change what rpmspec says about a package:
--- the files in its directory and any subdirectories like patches/ (but not
--- nested packages, which have their own fingerprint), the macros defined for
--- the release, and the rpm macros in effect (see 'macroFingerprint')
+-- | covers everything that can change what rpmspec says: the package's files
+-- (not nested packages, which have their own), the release's macros, and the
+-- rpm macros in effect (see 'macroFingerprint')
 specFingerprint :: Text -> [(Text, Maybe Text)] -> FilePath -> FilePath -> IO Text
 specFingerprint macros defines root rel = do
   files <- packageFiles (root </> rel)
   let header = TE.encodeUtf8 (macros <> "\0" <> T.pack (show defines) <> "\0" <> T.pack rel <> "\0")
-  -- feed each file to the hash as its own chunk instead of concatenating
-  -- them, which would copy every byte of the package dir once more
+  -- hashing file by file avoids copying the whole package dir into one buffer
   ctx <-
     foldM
       ( \c (f, entry) -> do
           body <- case entry of
-            -- hash where a symlink points, never what's behind it
             Link target -> pure ("<link> " <> TE.encodeUtf8 (T.pack target))
             File ->
               either (\(e :: IOException) -> "<unreadable> " <> TE.encodeUtf8 (T.pack (show e))) id
@@ -340,10 +313,8 @@ specFingerprint macros defines root rel = do
 
 data Entry = File | Link FilePath
 
--- | every file under a package dir, relative to it and sorted, skipping
--- subdirectories that are packages of their own. symlinks are recorded with
--- their target and never followed, so a dangling link or a link loop can't
--- crash or hang the walk
+-- | symlinks are recorded with their target and never followed, so a
+-- dangling link or a link loop can't crash or hang the walk
 packageFiles :: FilePath -> IO [(FilePath, Entry)]
 packageFiles dir = go ""
   where
@@ -363,10 +334,9 @@ packageFiles dir = go ""
               (True, False) -> go rel
               _ -> pure [(rel, File)]
 
--- | fingerprint of the whole rpm macro state, so updating rpm,
--- redhat-rpm-config or anda-srpm-macros, or editing ~/.rpmmacros, invalidates
--- cached evaluations. `rpm --showrc` dumps every macro rpm loaded, from every
--- path in its search list, which is more complete than listing files by hand
+-- | updating rpm, redhat-rpm-config or anda-srpm-macros, or editing
+-- ~/.rpmmacros, invalidates cached evaluations. `rpm --showrc` dumps every
+-- macro rpm loaded, which is more complete than listing macro files by hand
 macroFingerprint :: IO Text
 macroFingerprint = do
   showrc <- either ("no rpm: " <>) id <$> run "rpm" ["--showrc"]

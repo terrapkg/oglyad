@@ -1,7 +1,5 @@
 name: hackage
 
-# pushing a v<version> tag publishes that release to Hackage. running this by
-# hand uploads a package candidate instead, for previewing the Hackage page
 on:
   push:
     tags: ["v*"]
@@ -43,7 +41,7 @@ jobs:
             exit 1
           fi
 
-      # the exact tarball that gets uploaded is the one built and tested here
+      # build and test the exact tarball that gets uploaded
       - name: Build the sdist
         id: sdist
         run: |

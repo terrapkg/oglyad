@@ -1,9 +1,6 @@
--- | running the real andax on update.rhai scripts oglyad can't follow on its
--- own, like ones that scrape a page with get() and find().
---
--- anda rewrites specs in place, so it runs on a throwaway copy of the tree.
--- afterwards rpmspec reads the copy's spec, and whatever Version it says now
--- is what `anda update` would have set
+-- | anda rewrites specs in place, so it runs on a throwaway copy of the tree.
+-- whatever Version the copy's spec says afterwards is what `anda update`
+-- would have set
 module Oglyad.Source.Anda
   ( withScratchCopy,
     projectNames,
@@ -26,7 +23,6 @@ import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
 import System.IO (hClose, openBinaryTempFile)
 
--- | run an action on a copy of a tree (minus .git) that's deleted afterwards
 withScratchCopy :: FilePath -> (FilePath -> IO a) -> IO (Either Text a)
 withScratchCopy root act = do
   base <- (</> "anda-work") <$> cacheDir
@@ -50,8 +46,7 @@ withScratchCopy root act = do
     quietly :: IO () -> IO ()
     quietly a = () <$ (try a :: IO (Either SomeException ()))
 
--- | package directory to anda project name, from `anda list`, which prints
--- lines like "anda/apps/foo/pkg (apps/foo)"
+-- | `anda list` prints lines like "anda/apps/foo/pkg (apps/foo)"
 projectNames :: FilePath -> IO (Either Text (Map FilePath Text))
 projectNames copy = do
   r <- runCapture copy [("NO_COLOR", "1")] "anda" ["list"]
@@ -68,9 +63,9 @@ projectNames copy = do
             Just (takeDirectory (T.unpack path), name)
       _ -> Nothing
 
--- | `anda update` one project in the copy. anda reports a failing script
--- only in its log and still exits 0, so the log is where errors come from.
--- the script gets GITHUB_TOKEN, since anda refuses gh() without one
+-- | anda reports a failing script only in its log and still exits 0, so the
+-- log is where errors come from. the script gets GITHUB_TOKEN, since anda
+-- refuses gh() without one
 updateProject :: FilePath -> Maybe Text -> Text -> Text -> IO (Either Text ())
 updateProject copy token branch name = do
   let env = ("NO_COLOR", "1") : [("GITHUB_TOKEN", T.unpack t) | Just t <- [token]]
@@ -85,9 +80,8 @@ updateProject copy token branch name = do
     -- color-eyre reports look like "Error:\n   0: Project not found: x"
     failure err = maybe (lastLine err) T.strip (listToMaybe [T.drop 3 l' | l <- T.lines err, let l' = T.stripStart l, "0: " `T.isPrefixOf` l'])
 
--- | what went wrong in each script exception in anda's -v log: andax logs
--- "ERROR andax::run: Script Exception —— <project>" and then the reason on a
--- line starting with "├─═"
+-- | andax logs "ERROR andax::run: Script Exception —— <project>" and then the
+-- reason on a line starting with "├─═"
 scriptErrors :: Text -> [Text]
 scriptErrors = go . T.lines
   where
@@ -100,7 +94,7 @@ scriptErrors = go . T.lines
               [] -> "script exception" : go rest
         | otherwise -> go rest
 
--- | drop ANSI color codes, which color-eyre writes even with NO_COLOR set
+-- | color-eyre writes ANSI color codes even with NO_COLOR set
 stripAnsi :: Text -> Text
 stripAnsi t = case T.breakOn "\ESC[" t of
   (pre, "") -> pre

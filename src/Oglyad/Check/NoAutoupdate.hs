@@ -1,4 +1,3 @@
--- | packages with no update.rhai have to be bumped by hand
 module Oglyad.Check.NoAutoupdate (check) where
 
 import Oglyad.Types
