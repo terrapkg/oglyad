@@ -6,16 +6,17 @@ module Main (main) where
 
 import Control.Concurrent (threadDelay)
 import Control.Exception (SomeException, try)
-import Control.Monad (filterM, forM, unless, when)
+import Control.Monad (filterM, unless, when)
 import Data.ByteString qualified as BS
 import Data.ByteString.Lazy qualified as LBS
 import Data.List (nub)
+import Data.Maybe (isNothing)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (UTCTime, getCurrentTime)
 import GHC.Conc (getNumProcessors)
 import GHC.IO.Encoding (setFileSystemEncoding, setForeignEncoding, setLocaleEncoding, utf8)
-import Oglyad.App (HttpError (..), httpGetE, oglyadVersion, runApp)
+import Oglyad.App (HttpError (..), forConcurrentlyN, httpGetE, inRelease, note, oglyadVersion, runApp)
 import Oglyad.Check (checkNames, parseCheckName, runChecks)
 import Oglyad.Collect (buildSnapshot)
 import Oglyad.Ignore (Applied (..), IgnoreFile (..), applyIgnores, parseIgnoreFile)
@@ -109,6 +110,7 @@ configP = do
         cfgRelease = relVersion rel,
         cfgDist = releaseDist distro rel,
         cfgBranch = releaseBranch distro rel,
+        cfgRawhide = isRawhide rel,
         cfgStaleAfter = fromIntegral (staleDays * 86400),
         cfgCacheFor = fromIntegral (cacheHours * 3600),
         cfgConcurrency = maybe cores id jobs,
@@ -242,18 +244,24 @@ main = do
   start <- getCurrentTime
   let mono = cfgMonorepo (optConfig token cores start Nothing terra (Release "rawhide" 0))
   distro <- pickDistro mono optDistro
+  let baseCfg = optConfig token cores start Nothing distro (Release "rawhide" 0)
   let specRef rel = if optWorktree then Nothing else Just (optRemote <> "/" <> releaseBranch distro rel)
       mkCfg rel =
         let c = optConfig token cores start (specRef rel) distro rel
          in maybe c (\url -> c {cfgRepoUrl = repoUrlFor url rel}) optRepo
   releases <- resolveReleases mkCfg optReleases
 
-  let ran = if null optOnly then checkNames else optOnly
-  perRelease <- forM releases $ \rel -> do
+  when (cfgUpstream baseCfg && isNothing token) $
+    hPutStrLn stderr "oglyad: no GITHUB_TOKEN (or `gh auth token`), GitHub lookups will hit the 60/hour limit fast"
+
+  let ran = filter (`notElem` distroSkippedChecks distro) (if null optOnly then checkNames else optOnly)
+      logPrefix rel = if length releases > 1 then T.unpack (releaseLabel rel) <> ": " else ""
+  perRelease <- runApp baseCfg . forConcurrentlyN (length releases) releases $ \rel -> do
     let cfg = mkCfg rel
-    hPutStrLn stderr ("oglyad: checking " <> T.unpack (releaseLabel rel) <> " from " <> maybe "the working tree" T.unpack (cfgSpecRef cfg))
-    (snap, collectFindings) <- runApp cfg buildSnapshot
-    let findings = collectFindings <> runChecks optOnly snap
+    (snap, collectFindings) <- inRelease cfg (logPrefix rel) $ do
+      note ("checking " <> T.unpack (releaseLabel rel) <> " from " <> maybe "the working tree" T.unpack (cfgSpecRef cfg))
+      buildSnapshot
+    let findings = collectFindings <> runChecks ran snap
         applied
           | optNoIgnores = Applied findings [] [] []
           | otherwise = applyIgnores checkNames ran ignores (snapIgnoreLabels snap) findings

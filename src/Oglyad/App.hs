@@ -5,23 +5,29 @@ module Oglyad.App
     App,
     HttpError (..),
     runApp,
+    inRelease,
     httpGetE,
     forConcurrentlyN,
+    processSlot,
+    lookupOnce,
     note,
     oglyadVersion,
   )
 where
 
 import Control.Concurrent (threadDelay)
-import Control.Concurrent.Async (forConcurrently)
-import Control.Concurrent.MVar (MVar, newMVar, withMVar)
+import Control.Concurrent.Async (Async, async, forConcurrently)
+import Control.Concurrent.Async qualified as Async
+import Control.Concurrent.MVar (MVar, modifyMVar, newMVar, withMVar)
 import Control.Concurrent.QSem (QSem, newQSem, signalQSem, waitQSem)
 import Control.Exception (bracket_, throwIO, try)
-import Control.Monad.Reader (ReaderT, ask, asks, liftIO, runReaderT)
+import Control.Monad.Reader (ReaderT, ask, asks, liftIO, local, runReaderT)
 import Data.ByteString (ByteString)
 import Data.ByteString.Char8 qualified as BS8
 import Data.ByteString.Lazy qualified as LBS
 import Data.IORef (IORef, newIORef, readIORef, writeIORef)
+import Data.Map.Strict (Map)
+import Data.Map.Strict qualified as Map
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Text.Encoding qualified as TE
@@ -57,7 +63,11 @@ data Env = Env
     -- instead of each failing (and being reported) separately
     envGitHubLimited :: IORef (Maybe Text),
     -- | serializes progress messages so concurrent jobs can't interleave lines
-    envLogLock :: MVar ()
+    envLogLock :: MVar (),
+    envLogPrefix :: String,
+    envProcessSem :: QSem,
+    envLookups :: MVar (Map Text (Async (Either HttpError Text))),
+    envCacheLock :: MVar ()
   }
 
 type App = ReaderT Env IO
@@ -88,13 +98,19 @@ runApp cfg act = do
   ghSem <- newQSem 6
   limited <- newIORef Nothing
   logLock <- newMVar ()
-  runReaderT act (Env cfg mgr lock ghSem limited logLock)
+  procSem <- newQSem (max 1 (cfgConcurrency cfg))
+  lookups <- newMVar Map.empty
+  cacheLock <- newMVar ()
+  runReaderT act (Env cfg mgr lock ghSem limited logLock "" procSem lookups cacheLock)
+
+inRelease :: Config -> String -> App a -> App a
+inRelease cfg prefix = local (\env -> env {envConfig = cfg, envLogPrefix = prefix})
 
 -- | progress messages go to stderr so stdout stays clean for --json
 note :: String -> App ()
 note msg = do
-  lock <- asks envLogLock
-  liftIO (withMVar lock (\_ -> hPutStrLn stderr ("oglyad: " <> msg)))
+  Env {envLogLock, envLogPrefix} <- ask
+  liftIO (withMVar envLogLock (\_ -> hPutStrLn stderr ("oglyad: " <> envLogPrefix <> msg)))
 
 isGitHubApi :: Text -> Bool
 isGitHubApi = T.isPrefixOf "https://api.github.com/"
@@ -183,3 +199,19 @@ forConcurrentlyN n xs f = do
     sem <- newQSem (max 1 n)
     forConcurrently xs $ \x ->
       bracket_ (waitQSem sem) (signalQSem sem) (runReaderT (f x) env)
+
+processSlot :: App (IO a -> IO a)
+processSlot = do
+  sem <- asks envProcessSem
+  pure (bracket_ (waitQSem sem) (signalQSem sem))
+
+lookupOnce :: Text -> App (Either HttpError Text) -> App (Either HttpError Text)
+lookupOnce key act = do
+  env <- ask
+  liftIO $ do
+    running <- modifyMVar (envLookups env) $ \m -> case Map.lookup key m of
+      Just inFlight -> pure (m, inFlight)
+      Nothing -> do
+        started <- async (runReaderT act env)
+        pure (Map.insert key started m, started)
+    Async.wait running

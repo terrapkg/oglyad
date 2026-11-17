@@ -4,6 +4,7 @@ module Oglyad.Source.Monorepo
     SpecInfo (..),
     findPackageDirs,
     hclString,
+    hclList,
     versionMacros,
     querySpec,
     lastCommits,
@@ -59,7 +60,9 @@ data PkgDir = PkgDir
     pdIgnores :: [Text],
     -- | has a `nightly = N` or `quaterdaily = N` label, so it builds from a
     -- branch head on a schedule rather than from releases
-    pdNightly :: Bool
+    pdNightly :: Bool,
+    pdUpdBranch :: Bool,
+    pdArches :: [Text]
   }
   deriving stock (Eq, Show)
 
@@ -112,7 +115,9 @@ findPackageDirs root pkgRoot = go pkgRoot
             pdUpdateRhai = rhai,
             pdVersionMacros = specText >>= versionMacros,
             pdIgnores = maybe [] (filter (not . T.null) . map T.strip . T.splitOn ",") (hclString "oglyad_ignore" hcl),
-            pdNightly = any (isJust . (`hclString` hcl)) ["nightly", "quaterdaily"]
+            pdNightly = any (isJust . (`hclString` hcl)) ["nightly", "quaterdaily"],
+            pdUpdBranch = isJust (hclString "updbranch" hcl),
+            pdArches = hclList "arches" hcl
           }
 
 -- | the macro names a spec's Version: line refers to, read from the raw
@@ -148,6 +153,17 @@ hclString key hcl =
             Just quoted -> T.takeWhile (/= '"') quoted
             Nothing -> T.takeWhile (\c -> not (isSpace c) && c /= '#') raw,
       not (T.null v)
+    ]
+
+hclList :: Text -> Text -> [Text]
+hclList key hcl =
+  concat . take 1 $
+    [ filter (not . T.null) (map (T.dropAround (\c -> c == '"' || isSpace c)) (T.splitOn "," inside))
+    | l <- map T.strip (T.lines hcl),
+      Just rest <- [T.stripPrefix key l],
+      Just afterEq <- [T.stripPrefix "=" (T.stripStart rest)],
+      Just opened <- [T.stripPrefix "[" (T.stripStart afterEq)],
+      let inside = T.takeWhile (/= ']') opened
     ]
 
 -- | a directory that isn't a symlink

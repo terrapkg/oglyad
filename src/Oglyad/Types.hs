@@ -91,6 +91,7 @@ data Package = Package
     -- | a `nightly` or `quaterdaily` label in anda.hcl: built from a branch
     -- head on a schedule, not from releases
     pkgNightly :: Bool,
+    pkgUpdBranch :: Bool,
     -- | the spec file, relative to the tree it was read from
     pkgSpecPath :: Maybe FilePath,
     -- | hash of everything in the package dir that can change what rpmspec
@@ -162,6 +163,7 @@ data Config = Config
     -- | the monorepo branch name, f43 or frawhide. update.rhai
     -- scripts see it as labels.branch
     cfgBranch :: Text,
+    cfgRawhide :: Bool,
     -- | the main repo's name, e.g. terra44
     cfgRepoName :: Text,
     -- | where it is: a metalink or a base url, with {repo} where the repo

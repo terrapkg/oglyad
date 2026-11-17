@@ -51,18 +51,19 @@ data Distro = Distro
     -- | release branch prefix, f for f43
     distroBranch :: Text,
     -- | %{dist} prefix, .fc for .fc43
-    distroDist :: Text
+    distroDist :: Text,
+    distroSkippedChecks :: [Text]
   }
   deriving stock (Eq, Show)
 
 -- | terrapkg/packages
 terra :: Distro
-terra = Distro "terra" "anda" "terra" "f" ".fc"
+terra = Distro "terra" "anda" "terra" "f" ".fc" []
 
 -- | Ultramarine-Linux/packages. builds land in um43, umrawhide, with
 -- .um43 and .umrawhide dist tags
 ultramarine :: Distro
-ultramarine = Distro "ultramarine" "ultramarine" "um" "um" ".um"
+ultramarine = Distro "ultramarine" "ultramarine" "um" "um" ".um" ["no-autoupdate"]
 
 distros :: [Distro]
 distros = [terra, ultramarine]

@@ -24,7 +24,7 @@ import Oglyad.Regex qualified as Re
 import Oglyad.Release
 import Oglyad.Report (ReleaseInfo (..), Report (..), renderJson, renderMarkdown, renderText)
 import Oglyad.Source.Anda (scriptErrors, stripAnsi)
-import Oglyad.Source.Monorepo (PkgDir (..), checkoutRef, findPackageDirs, hclString, lastCommits, macroFingerprint, specFingerprint, versionMacros)
+import Oglyad.Source.Monorepo (PkgDir (..), checkoutRef, findPackageDirs, hclList, hclString, lastCommits, macroFingerprint, specFingerprint, versionMacros)
 import Oglyad.Source.Repodata (RpmEntry (..), decompressAndParse, fetchRepo, latestBySource, parseMetalink, parsePrimary, srpmName)
 import Oglyad.Source.Rhai (parseUpdateRhai, parseUpdateRhaiWith)
 import Oglyad.Source.RhaiEval (Simulated (..), simulateVersion)
@@ -236,6 +236,9 @@ main = hspec $ do
     it "finds the spec" $ hclString "spec" hcl `shouldBe` Just "zed.spec"
     it "finds the subrepo" $ hclString "subrepo" hcl `shouldBe` Just "extras"
     it "doesn't match key prefixes" $ hclString "sub" hcl `shouldBe` Nothing
+    it "reads lists like arches" $ do
+      hclList "arches" "project pkg {\n  arches = [\"aarch64\", \"x86_64\"]\n}\n" `shouldBe` ["aarch64", "x86_64"]
+      hclList "arches" "project pkg {\n  arch = \"x86_64\"\n}\n" `shouldBe` []
     it "reads bare values like nightly = 1" $ hclString "nightly" "labels {\n  nightly = 2 # slot\n}\n" `shouldBe` Just "2"
 
   describe "parseUpdateRhai" $ do
@@ -290,11 +293,15 @@ main = hspec $ do
     it "strips color codes" $
       stripAnsi "   0: \ESC[91mProject not found: x\ESC[0m" `shouldBe` "   0: Project not found: x"
 
-  describe "unparsed-rhai with anda" $
+  describe "unparsed-rhai with anda" $ do
+    let unknown = pkg {pkgUpstream = Just (Unknown "let x = get(\"u\");"), pkgUpdBranch = True}
     it "stays quiet once anda answered for the script" $ do
-      let unknown = pkg {pkgUpstream = Just (Unknown "let x = get(\"u\");")}
       map fCheck (UnparsedRhai.check snapshot unknown) `shouldBe` ["unparsed-rhai"]
       UnparsedRhai.check snapshot unknown {pkgUpstreamVer = Just "1.3.0"} `shouldBe` []
+    it "only reports scripts without updbranch on rawhide" $ do
+      let rawhide = snapshot {snapConfig = (snapConfig snapshot) {cfgRawhide = True}}
+      UnparsedRhai.check snapshot unknown {pkgUpdBranch = False} `shouldBe` []
+      map fCheck (UnparsedRhai.check rawhide unknown {pkgUpdBranch = False}) `shouldBe` ["unparsed-rhai"]
 
   describe "versionMacros" $ do
     it "finds %name, %{name} and %{?name}" $
@@ -628,6 +635,7 @@ pkg =
       pkgPath = "anda/devs/zed/stable",
       pkgSubrepo = Nothing,
       pkgNightly = False,
+      pkgUpdBranch = False,
       pkgSpecPath = Just "anda/devs/zed/stable/zed.spec",
       pkgFingerprint = "",
       pkgSpecEVR = Just (EVR 0 "1.2.0" "1.fc44"),
@@ -652,6 +660,7 @@ snapshot =
             cfgRoot = "anda",
             cfgSpecRef = Nothing,
             cfgBranch = "f44",
+            cfgRawhide = False,
             cfgRepoName = "terra44",
             cfgRepoUrl = defaultRepoUrl,
             cfgFedoraRepos = [],
