@@ -182,7 +182,8 @@ el n = Release EL ("el" <> T.pack (show n)) n
 
 elReleasesFrom :: [Text] -> [Release]
 elReleasesFrom branches =
-  sortOn relVersion
+  sortOn
+    relVersion
     [ el n
     | b <- nub branches,
       Just digits <- [T.stripPrefix "el" b],

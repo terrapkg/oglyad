@@ -556,7 +556,8 @@ main = hspec $ do
       elReleasesFrom ["HEAD", "el11", "f44", "el10", "el", "elx", "el10", "cypress/el10"]
         `shouldBe` [el 10, el 11]
     it "reads the repo name out of remote urls" $
-      map remoteRepoName
+      map
+        remoteRepoName
         [ "git@github.com:terrapkg/packages-el.git",
           "https://github.com/terrapkg/packages-el/",
           "git@github.com:terrapkg/packages",
