@@ -16,7 +16,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime, nominalDay)
 import Oglyad.App (App, Env (..), HttpError (..), forConcurrentlyN, lookupOnce, note, processSlot)
-import Oglyad.Source.Anda (projectNames, updateProject, withScratchCopy)
+import Oglyad.Source.Anda (projectNames, reportSupported, updateProject, withScratchCopy)
 import Oglyad.Source.Cache (CacheEntry (..), UpstreamCache, loadJson, lookupFresh, saveJson)
 import Oglyad.Source.Monorepo
 import Oglyad.Source.Repodata (fetchRepo)
@@ -286,12 +286,15 @@ withAnda root now pkgs = do
         _ -> Nothing
       misses = [p | p <- wanted, isNothing (fresh p)]
   hasAnda <- liftIO (isJust <$> findExecutable "anda")
+  andaReports <- if hasAnda && not (null misses) then liftIO reportSupported else pure False
   (problems, ran) <-
     if
       | null misses -> pure ([], Map.empty)
       | not hasAnda -> do
           note ("anda not found, so " <> show (length misses) <> " update.rhai scripts oglyad can't follow are skipped")
           pure ([], Map.empty)
+      | not andaReports ->
+          pure ([(collectErr "anda" ("anda is too old for `anda update --report`, so " <> T.pack (show (length misses)) <> " update.rhai scripts oglyad can't follow are skipped. update anda")) {fSeverity = Warn}], Map.empty)
       | otherwise -> do
           note ("running anda update for " <> show (length wanted) <> " scripts oglyad can't follow, " <> show (length wanted - length misses) <> " cached")
           env <- ask

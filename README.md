@@ -183,6 +183,8 @@ more than that, like scraping a page with `get()` and `find()`, filtering
 instead. with `-u` and `anda` on the PATH, oglyad copies the release's tree
 to a throwaway directory, runs `anda update --labels branch=<f43> <project>`
 for each of those, and reads the Version rpmspec sees in the rewritten spec.
+whether a script failed comes from the `--report` json anda writes, so this
+needs an anda new enough to have `anda update --report`.
 like Terra's update workflows, only projects with an `updbranch` label run on
 release branches. the rest only run on rawhide. a script that throws shows up as `upstream-error`. answers are cached like
 upstream ones.
