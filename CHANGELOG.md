@@ -1,5 +1,13 @@
 # changelog
 
+## unreleased
+
+- scripts run under anda are read from `anda update --report` instead of
+  anda's log, so a failing helper shows up as `gh(): status code 404 (line 3)`
+  instead of the first line of the traceback. this needs an anda with
+  `--report`. an older one is a `collect` warning and those scripts are
+  skipped
+
 ## 0.1.5.0
 
 - redo comments

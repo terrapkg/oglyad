@@ -23,7 +23,7 @@ import Oglyad.Process (childEnv, run)
 import Oglyad.Regex qualified as Re
 import Oglyad.Release
 import Oglyad.Report (ReleaseInfo (..), Report (..), renderJson, renderMarkdown, renderText)
-import Oglyad.Source.Anda (scriptErrors, stripAnsi)
+import Oglyad.Source.Anda (ProjectRun (..), RunError (..), RunStatus (..), describeError, parseReport, stripAnsi)
 import Oglyad.Source.Monorepo (PkgDir (..), checkoutRef, findPackageDirs, hclList, hclString, lastCommits, macroFingerprint, specFingerprint, versionMacros)
 import Oglyad.Source.Repodata (RpmEntry (..), decompressAndParse, fetchRepo, latestBySource, parseMetalink, parsePrimary, srpmName)
 import Oglyad.Source.Rhai (parseUpdateRhai, parseUpdateRhaiWith)
@@ -279,15 +279,21 @@ main = hspec $ do
     it "doesn't guess NoVersion without the spec's Version: line" $
       parseUpdateRhai "rpm.release();" `shouldSatisfy` isUnknown
 
-  describe "anda logs" $ do
-    it "pulls the reason out of a script exception" $
-      scriptErrors
-        "  2026-11-09T22:25:38.348511Z ERROR andax::run: Script Exception \8212\8212 lib/libfreeaptx\n\
-        \   \9500\9472\9552 Rhai: Syntax error: Expecting ';' to terminate this statement (line 5, position 39)\n\
-        \    in andax::run::traceback with proj=\"lib/libfreeaptx\"\n"
-        `shouldBe` ["Rhai: Syntax error: Expecting ';' to terminate this statement (line 5, position 39)"]
-    it "finds nothing in a clean log" $
-      scriptErrors "  2026-11-09T22:25:34Z DEBUG anda_config::config: Reading hcl file: \"anda.hcl\"\n" `shouldBe` []
+  describe "anda reports" $ do
+    it "reads a failed script" $
+      parseReport
+        "{\"version\": 1, \"projects\": [{\"project\": \"lib/x/pkg\", \"alias\": \"lib/x\", \"script\": \"anda/lib/x/update.rhai\", \"spec\": null, \"status\": \"failed\", \"spec_changed\": false, \"duration_ms\": 3, \"error\": {\"kind\": \"script\", \"message\": \"status code 404\", \"function\": \"gh\", \"line\": 3, \"column\": 9}}]}"
+        `shouldBe` Right [ProjectRun "lib/x/pkg" Failed (Just (RunError "status code 404" (Just "gh") (Just 3)))]
+    it "reads a script that stopped itself" $
+      parseReport "{\"version\": 1, \"projects\": [{\"project\": \"a\", \"status\": \"terminated\", \"error\": null}]}"
+        `shouldBe` Right [ProjectRun "a" Terminated Nothing]
+    it "refuses a newer report version" $
+      parseReport "{\"version\": 2, \"projects\": []}" `shouldSatisfy` either (const True) (const False)
+    it "names the failing helper and line" $ do
+      describeError (RunError "status code 404" (Just "gh") (Just 3)) `shouldBe` "gh(): status code 404 (line 3)"
+      describeError (RunError "upstream moved" Nothing Nothing) `shouldBe` "upstream moved"
+      describeError (RunError "Function not found: header\nin call to function 'bodhi' (line 16)" Nothing (Just 7))
+        `shouldBe` "Function not found: header, in call to function 'bodhi' (line 16) (line 7)"
     it "strips color codes" $
       stripAnsi "   0: \ESC[91mProject not found: x\ESC[0m" `shouldBe` "   0: Project not found: x"
 
@@ -550,7 +556,8 @@ main = hspec $ do
       elReleasesFrom ["HEAD", "el11", "f44", "el10", "el", "elx", "el10", "cypress/el10"]
         `shouldBe` [el 10, el 11]
     it "reads the repo name out of remote urls" $
-      map remoteRepoName
+      map
+        remoteRepoName
         [ "git@github.com:terrapkg/packages-el.git",
           "https://github.com/terrapkg/packages-el/",
           "git@github.com:terrapkg/packages",
