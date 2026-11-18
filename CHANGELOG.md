@@ -7,6 +7,9 @@
   instead of the first line of the traceback. this needs an anda with
   `--report`. an older one is a `collect` warning and those scripts are
   skipped
+- builds with GHC 9.6 and the libraries EPEL 10 ships, so the el10 package
+  no longer has to strip version bounds. CI builds against both Fedora and
+  EPEL 10
 
 ## 0.1.5.0
 

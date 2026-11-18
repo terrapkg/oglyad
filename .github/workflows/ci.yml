@@ -54,10 +54,18 @@ jobs:
           ormolu --mode check --check-idempotence "${files[@]}"
 
   build:
-    name: build and test (Fedora libraries)
+    name: build and test (${{ matrix.name }} libraries)
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: Fedora
+            image: f45
+          - name: EPEL 10
+            image: el10
     container:
-      image: ghcr.io/terrapkg/builder:f45
+      image: ghcr.io/terrapkg/builder:${{ matrix.image }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -65,8 +73,8 @@ jobs:
 
       - name: Install dependencies
         run: |
-          dnf5 -y -q install cabal-install
-          dnf5 -y -q builddep oglyad.spec
+          dnf -y -q install cabal-install
+          dnf -y -q builddep oglyad.spec
 
       - name: Configure
         run: |

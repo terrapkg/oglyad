@@ -23,6 +23,7 @@ import Data.ByteString qualified as BS
 import Data.ByteString.Base16 qualified as B16
 import Data.Char (isAlphaNum, isSpace)
 import Data.List (sort)
+import Data.List qualified as List
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
 import Data.Maybe (isJust, listToMaybe)
@@ -207,7 +208,7 @@ lastCommits root pkgRoot ref dirs = do
       -- which the ZonedTime parser rejects
       Just stamp -> go (posixSecondsToUTCTime . fromInteger . fst <$> either (const Nothing) Just (TR.decimal stamp)) acc ls
       Nothing -> case cur of
-        Just t | not (T.null l) -> go cur (foldl' (claim t) acc (ancestors l)) ls
+        Just t | not (T.null l) -> go cur (List.foldl' (claim t) acc (ancestors l)) ls
         _ -> go cur acc ls
     -- a file counts for every package dir above it, like `git log -- dir` does
     claim t acc d
