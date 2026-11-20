@@ -3,9 +3,9 @@ module Oglyad.Collect
   )
 where
 
+import Control.Applicative ((<|>))
 import Control.Concurrent.Async (concurrently)
 import Control.Concurrent.MVar (withMVar)
-import Control.Applicative ((<|>))
 import Control.Monad (forM, join)
 import Control.Monad.Reader (ask, asks, liftIO, runReaderT)
 import Data.Either (partitionEithers)
