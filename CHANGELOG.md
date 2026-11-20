@@ -1,6 +1,6 @@
 # changelog
 
-## unreleased
+## 0.1.6.0
 
 - new `submodules` check (`-u`): update.rhai scripts that call
   `rpm.submodules()` run under anda, and a submodule upstream added without a
