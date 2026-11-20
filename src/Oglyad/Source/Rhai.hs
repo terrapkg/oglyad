@@ -7,11 +7,12 @@ module Oglyad.Source.Rhai
     tokenize,
     sourceCall,
     balanced,
+    tracksSubmodules,
   )
 where
 
 import Data.Char (isAlphaNum, isDigit, isSpace)
-import Data.List (nub)
+import Data.List (nub, tails)
 import Data.Maybe (listToMaybe, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
@@ -102,6 +103,15 @@ balanced = go []
             _ -> False
       _ : ts -> go stack ts
     pairs = [('(', ')'), ('[', ']'), ('{', '}')]
+
+tracksSubmodules :: Text -> Bool
+tracksSubmodules src = case tokenize src of
+  Just toks -> any submodulesCall (tails toks)
+  Nothing -> False
+  where
+    submodulesCall = \case
+      TIdent "rpm" : TSym '.' : TIdent "submodules" : TSym '(' : _ -> True
+      _ -> False
 
 resolveVersion :: [Token] -> Maybe UpstreamSource
 resolveVersion toks = listToMaybe (mapMaybe (resolveExpr toks 5) (versionExprs toks))

@@ -3,6 +3,7 @@ module Oglyad.Source.Cache
     loadJson,
     saveJson,
     CacheEntry (..),
+    AndaEntry (..),
     UpstreamCache,
     lookupFresh,
   )
@@ -17,7 +18,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, diffUTCTime)
 import GHC.Generics (Generic)
-import Oglyad.Types (UpstreamSource)
+import Oglyad.Types (SubmoduleEvent, UpstreamSource)
 import System.Directory (XdgDirectory (XdgCache), createDirectoryIfMissing, getXdgDirectory, renameFile)
 import System.FilePath ((</>))
 import System.IO (hClose, openBinaryTempFile)
@@ -47,6 +48,14 @@ bestEffort action = either (\(_ :: SomeException) -> ()) id <$> try action
 data CacheEntry = CacheEntry
   { ceFetched :: UTCTime,
     ceResult :: Either Text Text
+  }
+  deriving stock (Show, Generic)
+  deriving anyclass (ToJSON, FromJSON)
+
+data AndaEntry = AndaEntry
+  { aeFetched :: UTCTime,
+    aeResult :: Either Text Text,
+    aeEvents :: [SubmoduleEvent]
   }
   deriving stock (Show, Generic)
   deriving anyclass (ToJSON, FromJSON)

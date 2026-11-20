@@ -167,6 +167,7 @@ reported as `unused-ignore`, so exceptions don't outlive their reason. `--no-ign
 | `duplicate-name` | warn                                     | two directories build the same package name into the same repo, so they overwrite each other                                                                                                                                                                                                   |
 | `stale`          | info, warn with `-u`                     | last build is older than `--stale-days`, warn if upstream also moved on                                                                                                                                                                                                                        |
 | `upstream-error` | warn                                     | the upstream from update.rhai 404s or fails, so `anda update` is failing too                                                                                                                                                                                                                   |
+| `submodules`     | warn                                     | upstream added a submodule the spec has no `%global submodule_*` for, or dropped one it still has (`-u`). comes from anda running a script that calls `rpm.submodules()`, see below                                                                                                            |
 | `fedora-overlap` | warn                                     | the base distro ships the same source package (`--base`, or `--fedora`): Fedora's release and updates repos, AlmaLinux and EPEL for `el10`, or Tumbleweed's oss and update repos for Tuatara. subrepos are exempt                                                                              |
 | `no-autoupdate`  | info                                     | no update.rhai, or one with only comments in it                                                                                                                                                                                                                                                |
 | `unparsed-rhai`  | info, warn when anda can't run it either | update.rhai looks a version up in a way oglyad can't follow, like custom scraping, and anda didn't answer for it (no `-u`, or anda isn't installed). scripts that only bump Release, track a commit, or copy Version from another spec aren't listed                                           |
@@ -188,6 +189,11 @@ needs an anda new enough to have `anda update --report`. (TODO: add version)
 like Terra's update workflows, only projects with an `updbranch` label run on
 release branches. the rest only run on rawhide. a script that throws shows up as `upstream-error`. answers are cached like
 upstream ones.
+
+scripts that call `rpm.submodules()` always go to anda too, even when oglyad
+can follow their version, since only anda knows what the submodules are. the
+submodules anda reports as added or dropped become `submodules` warnings. a
+submodule in the script's `ignore` list isn't reported.
 
 ## how it works
 

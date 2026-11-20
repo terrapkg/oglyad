@@ -15,6 +15,7 @@ import Oglyad.Check.DuplicateName qualified as DuplicateName
 import Oglyad.Check.FedoraOverlap qualified as FedoraOverlap
 import Oglyad.Check.NoAutoupdate qualified as NoAutoupdate
 import Oglyad.Check.Stale qualified as Stale
+import Oglyad.Check.Submodules qualified as Submodules
 import Oglyad.Check.UnparsedRhai qualified as UnparsedRhai
 import Oglyad.Check.UpstreamError qualified as UpstreamError
 import Oglyad.Types
@@ -27,6 +28,7 @@ allChecks =
     ("fedora-overlap", FedoraOverlap.check),
     ("no-autoupdate", NoAutoupdate.check),
     ("stale", Stale.check),
+    ("submodules", Submodules.check),
     ("unparsed-rhai", UnparsedRhai.check),
     ("upstream-error", UpstreamError.check)
   ]

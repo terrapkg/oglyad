@@ -16,7 +16,8 @@ module Oglyad.Source.Anda
 where
 
 import Control.Exception (SomeException, finally, try)
-import Data.Aeson (FromJSON (..), eitherDecodeStrict, withObject, withText, (.:), (.:?))
+import Data.Aeson (FromJSON (..), Value, eitherDecodeStrict, withObject, withText, (.!=), (.:), (.:?))
+import Data.Aeson.Types (parseMaybe)
 import Data.ByteString qualified as BS
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -25,6 +26,7 @@ import Data.Text (Text)
 import Data.Text qualified as T
 import Oglyad.Process (run, runCapture)
 import Oglyad.Source.Cache (cacheDir)
+import Oglyad.Types (SubmoduleEvent)
 import System.Directory (createDirectory, createDirectoryIfMissing, removeFile, removePathForcibly)
 import System.Exit (ExitCode (..))
 import System.FilePath (takeDirectory, (</>))
@@ -79,7 +81,7 @@ reportSupported = do
 
 -- | anda still exits 0 when a script fails, so the report is where failures
 -- come from. the script gets GITHUB_TOKEN, since anda refuses gh() without one
-updateProject :: FilePath -> Maybe Text -> Text -> Text -> IO (Either Text ())
+updateProject :: FilePath -> Maybe Text -> Text -> Text -> IO (Either Text [SubmoduleEvent])
 updateProject copy token branch name = do
   (report, h) <- openBinaryTempFile copy "anda-report.json"
   hClose h
@@ -97,7 +99,7 @@ updateProject copy token branch name = do
       Right [run'] -> case runStatus run' of
         Failed -> Left (maybe "update.rhai failed" describeError (runError run'))
         Panicked -> Left ("anda panicked" <> maybe "" ((": " <>) . errMessage) (runError run'))
-        _ -> Right ()
+        _ -> Right (runEvents run')
       Right runs -> Left ("anda's report has " <> T.pack (show (length runs)) <> " projects instead of one")
 
 data RunStatus = Ran | Failed | Terminated | Panicked
@@ -125,13 +127,18 @@ instance FromJSON RunError where
 data ProjectRun = ProjectRun
   { runProject :: Text,
     runStatus :: RunStatus,
-    runError :: Maybe RunError
+    runError :: Maybe RunError,
+    runEvents :: [SubmoduleEvent]
   }
   deriving stock (Eq, Show)
 
 instance FromJSON ProjectRun where
   parseJSON = withObject "project" $ \o ->
-    ProjectRun <$> o .: "project" <*> o .: "status" <*> o .:? "error"
+    ProjectRun
+      <$> o .: "project"
+      <*> o .: "status"
+      <*> o .:? "error"
+      <*> (mapMaybe (parseMaybe parseJSON) <$> (o .:? "events" .!= ([] :: [Value])))
 
 newtype Report = Report [ProjectRun]
 

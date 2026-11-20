@@ -2,6 +2,12 @@
 
 ## unreleased
 
+- new `submodules` check (`-u`): update.rhai scripts that call
+  `rpm.submodules()` run under anda, and a submodule upstream added without a
+  `%global submodule_*`, or one the spec still has after upstream dropped it,
+  is a warning. needs an anda with `rpm.submodules()`. the first run after
+  upgrading reruns every script under anda, since its cache now keeps the
+  submodule changes too
 - scripts run under anda are read from `anda update --report` instead of
   anda's log, so a failing helper shows up as `gh(): status code 404 (line 3)`
   instead of the first line of the traceback. this needs an anda with

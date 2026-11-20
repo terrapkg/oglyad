@@ -17,6 +17,7 @@ import Oglyad.Check.Drift qualified as Drift
 import Oglyad.Check.DuplicateName qualified as DuplicateName
 import Oglyad.Check.FedoraOverlap qualified as FedoraOverlap
 import Oglyad.Check.Stale qualified as Stale
+import Oglyad.Check.Submodules qualified as Submodules
 import Oglyad.Check.UnparsedRhai qualified as UnparsedRhai
 import Oglyad.Ignore
 import Oglyad.Process (childEnv, run)
@@ -26,7 +27,7 @@ import Oglyad.Report (ReleaseInfo (..), Report (..), renderJson, renderMarkdown,
 import Oglyad.Source.Anda (ProjectRun (..), RunError (..), RunStatus (..), describeError, parseReport, stripAnsi)
 import Oglyad.Source.Monorepo (PkgDir (..), checkoutRef, findPackageDirs, hclList, hclString, lastCommits, macroFingerprint, specFingerprint, versionMacros)
 import Oglyad.Source.Repodata (RpmEntry (..), decompressAndParse, fetchRepo, latestBySource, parseMetalink, parsePrimary, srpmName)
-import Oglyad.Source.Rhai (parseUpdateRhai, parseUpdateRhaiWith)
+import Oglyad.Source.Rhai (parseUpdateRhai, parseUpdateRhaiWith, tracksSubmodules)
 import Oglyad.Source.RhaiEval (Simulated (..), simulateVersion)
 import Oglyad.Source.Upstream (isSemver)
 import Oglyad.Types
@@ -283,10 +284,25 @@ main = hspec $ do
     it "reads a failed script" $
       parseReport
         "{\"version\": 1, \"projects\": [{\"project\": \"lib/x/pkg\", \"alias\": \"lib/x\", \"script\": \"anda/lib/x/update.rhai\", \"spec\": null, \"status\": \"failed\", \"spec_changed\": false, \"duration_ms\": 3, \"error\": {\"kind\": \"script\", \"message\": \"status code 404\", \"function\": \"gh\", \"line\": 3, \"column\": 9}}]}"
-        `shouldBe` Right [ProjectRun "lib/x/pkg" Failed (Just (RunError "status code 404" (Just "gh") (Just 3)))]
+        `shouldBe` Right [ProjectRun "lib/x/pkg" Failed (Just (RunError "status code 404" (Just "gh") (Just 3))) []]
     it "reads a script that stopped itself" $
       parseReport "{\"version\": 1, \"projects\": [{\"project\": \"a\", \"status\": \"terminated\", \"error\": null}]}"
-        `shouldBe` Right [ProjectRun "a" Terminated Nothing]
+        `shouldBe` Right [ProjectRun "a" Terminated Nothing []]
+    it "reads submodule events and skips kinds it doesn't know" $
+      parseReport
+        "{\"version\": 1, \"projects\": [{\"project\": \"a\", \"status\": \"ok\", \"error\": null, \"events\": [\
+        \{\"kind\": \"submodule-added\", \"path\": \"lib/date\", \"url\": \"https://github.com/HowardHinnant/date\", \"commit\": \"abc\", \"global\": \"submodule_lib_date\"}, \
+        \{\"kind\": \"submodule-dropped\", \"global\": \"submodule_lib_old\", \"commit\": \"def\"}, \
+        \{\"kind\": \"something-new\"}]}]}"
+        `shouldBe` Right
+          [ ProjectRun
+              "a"
+              Ran
+              Nothing
+              [ SubmoduleAdded "lib/date" "https://github.com/HowardHinnant/date" "abc" "submodule_lib_date",
+                SubmoduleDropped "submodule_lib_old" "def"
+              ]
+          ]
     it "refuses a newer report version" $
       parseReport "{\"version\": 2, \"projects\": []}" `shouldSatisfy` either (const True) (const False)
     it "names the failing helper and line" $ do
@@ -296,6 +312,28 @@ main = hspec $ do
         `shouldBe` "Function not found: header, in call to function 'bodhi' (line 16) (line 7)"
     it "strips color codes" $
       stripAnsi "   0: \ESC[91mProject not found: x\ESC[0m" `shouldBe` "   0: Project not found: x"
+
+  describe "submodules" $ do
+    it "finds rpm.submodules() calls" $ do
+      tracksSubmodules "let tag = gh(\"a/b\");\nrpm.version(tag);\nrpm.submodules(gh_submodules(\"a/b\", tag));" `shouldBe` True
+      tracksSubmodules "// rpm.submodules(x)\nrpm.version(gh(\"a/b\"));" `shouldBe` False
+    it "reports added and dropped submodules" $ do
+      let found =
+            Submodules.check
+              snapshot
+              pkg
+                { pkgSubmoduleEvents =
+                    [ SubmoduleAdded "lib/date" "https://github.com/HowardHinnant/date" (T.replicate 40 "a") "submodule_lib_date",
+                      SubmoduleDropped "submodule_lib_old" (T.replicate 40 "b")
+                    ]
+                }
+      map (\f -> (fCheck f, fSeverity f)) found `shouldBe` [("submodules", Warn), ("submodules", Warn)]
+      map fMessage found
+        `shouldBe` [ "upstream added the submodule lib/date (https://github.com/HowardHinnant/date at aaaaaaaaaaaa). add %global submodule_lib_date with a Source and %submodule_setup line, or pass it to rpm.submodules() as ignore",
+                     "upstream dropped the submodule for %global submodule_lib_old. remove the global, its Source and its %submodule_setup line"
+                   ]
+    it "is quiet without events" $
+      Submodules.check snapshot pkg `shouldBe` []
 
   describe "unparsed-rhai with anda" $ do
     let unknown = pkg {pkgUpstream = Just (Unknown "let x = get(\"u\");"), pkgUpdBranch = True}
@@ -712,6 +750,7 @@ pkg =
       pkgRhai = Nothing,
       pkgUpstreamVer = Nothing,
       pkgUpstreamErr = Nothing,
+      pkgSubmoduleEvents = [],
       pkgRepoChecked = True
     }
 

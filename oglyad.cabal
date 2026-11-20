@@ -63,6 +63,7 @@ common modules
     Oglyad.Check.FedoraOverlap
     Oglyad.Check.NoAutoupdate
     Oglyad.Check.Stale
+    Oglyad.Check.Submodules
     Oglyad.Check.UnparsedRhai
     Oglyad.Check.UpstreamError
     Oglyad.Collect

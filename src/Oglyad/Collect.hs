@@ -5,6 +5,7 @@ where
 
 import Control.Concurrent.Async (concurrently)
 import Control.Concurrent.MVar (withMVar)
+import Control.Applicative ((<|>))
 import Control.Monad (forM, join)
 import Control.Monad.Reader (ask, asks, liftIO, runReaderT)
 import Data.Either (partitionEithers)
@@ -17,10 +18,10 @@ import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime, nominalDay)
 import Oglyad.App (App, Env (..), HttpError (..), forConcurrentlyN, lookupOnce, note, processSlot)
 import Oglyad.Source.Anda (projectNames, reportSupported, updateProject, withScratchCopy)
-import Oglyad.Source.Cache (CacheEntry (..), UpstreamCache, loadJson, lookupFresh, saveJson)
+import Oglyad.Source.Cache (AndaEntry (..), CacheEntry (..), UpstreamCache, loadJson, lookupFresh, saveJson)
 import Oglyad.Source.Monorepo
 import Oglyad.Source.Repodata (fetchRepo)
-import Oglyad.Source.Rhai (parseUpdateRhaiWith, tokenize)
+import Oglyad.Source.Rhai (parseUpdateRhaiWith, tokenize, tracksSubmodules)
 import Oglyad.Source.RhaiEval (Simulated (..), simulateVersion)
 import Oglyad.Source.Upstream (latestVersion)
 import Oglyad.Types
@@ -192,6 +193,7 @@ toPackage commits key PkgDir {..} = \case
           pkgRhai = pdUpdateRhai,
           pkgUpstreamVer = Nothing,
           pkgUpstreamErr = Nothing,
+          pkgSubmoduleEvents = [],
           pkgRepoChecked = False
         }
   where
@@ -276,13 +278,14 @@ withAnda root now pkgs = do
   cfg@Config {..} <- asks envConfig
   let wanted =
         [ p
-        | p@Package {pkgUpstream = Just (Unknown _), pkgSpecPath = Just _} <- pkgs,
+        | p@Package {pkgSpecPath = Just _} <- pkgs,
+          unfollowable p || maybe False tracksSubmodules (pkgRhai p),
           cfgRolling || pkgUpdBranch p
         ]
       cacheFile = "anda" <> T.unpack cfgCacheTag <> ".json"
-  cache <- liftIO (fromMaybe Map.empty <$> loadJson cacheFile) :: App (Map Text CacheEntry)
+  cache <- liftIO (fromMaybe Map.empty <$> loadJson cacheFile) :: App (Map Text AndaEntry)
   let fresh p = case Map.lookup (pkgFingerprint p) cache of
-        Just e | diffUTCTime now (ceFetched e) <= cacheMaxAge cfg now -> Just e
+        Just e | diffUTCTime now (aeFetched e) <= cacheMaxAge cfg now -> Just e
         _ -> Nothing
       misses = [p | p <- wanted, isNothing (fresh p)]
   hasAnda <- liftIO (isJust <$> findExecutable "anda")
@@ -291,12 +294,12 @@ withAnda root now pkgs = do
     if
       | null misses -> pure ([], Map.empty)
       | not hasAnda -> do
-          note ("anda not found, so " <> show (length misses) <> " update.rhai scripts oglyad can't follow are skipped")
+          note ("anda not found, so " <> show (length misses) <> " update.rhai scripts that need anda are skipped")
           pure ([], Map.empty)
       | not andaReports ->
-          pure ([(collectErr "anda" ("anda is too old for `anda update --report`, so " <> T.pack (show (length misses)) <> " update.rhai scripts oglyad can't follow are skipped. update anda")) {fSeverity = Warn}], Map.empty)
+          pure ([(collectErr "anda" ("anda is too old for `anda update --report`, so " <> T.pack (show (length misses)) <> " update.rhai scripts that need anda are skipped. update anda")) {fSeverity = Warn}], Map.empty)
       | otherwise -> do
-          note ("running anda update for " <> show (length wanted) <> " scripts oglyad can't follow, " <> show (length wanted - length misses) <> " cached")
+          note ("running anda update for " <> show (length wanted) <> " scripts that need anda, " <> show (length wanted - length misses) <> " cached")
           env <- ask
           inSlot <- processSlot
           r <- liftIO $ withScratchCopy root $ \copy ->
@@ -308,28 +311,34 @@ withAnda root now pkgs = do
                     (Just name, Just spec) ->
                       updateProject copy cfgGitHubToken cfgBranch name >>= \case
                         Left e -> pure (Left e)
-                        Right () ->
-                          either (Left . ("rpmspec failed on the updated spec: " <>)) (Right . evrVersion . siEVR)
+                        Right events ->
+                          either (Left . ("rpmspec failed on the updated spec: " <>)) (\i -> Right (evrVersion (siEVR i), events))
                             <$> querySpec cfgMacros (copy </> spec)
                     _ -> pure (Left "anda doesn't list this project")
           pure $ case join r of
             Left e -> ([(collectErr "anda" e) {fSeverity = Warn}], Map.empty)
             Right xs -> ([], Map.fromList xs)
-  let answer p = maybe (Map.lookup (pkgPath p) ran) (Just . ceResult) (fresh p)
+  let answer p = maybe (Map.lookup (pkgPath p) ran) (\e -> Just ((,aeEvents e) <$> aeResult e)) (fresh p)
       new =
         Map.fromList
-          [ (pkgFingerprint p, CacheEntry now (Right v))
+          [ (pkgFingerprint p, AndaEntry now (Right v) events)
           | p <- misses,
-            Just (Right v) <- [Map.lookup (pkgPath p) ran]
+            Just (Right (v, events)) <- [Map.lookup (pkgPath p) ran]
           ]
-  liftIO (saveJson cacheFile (new <> Map.filter (fetchedThisMonth now) cache))
+  liftIO (saveJson cacheFile (new <> Map.filter ((< 30 * nominalDay) . diffUTCTime now . aeFetched) cache))
   pure
     ( problems,
       \p -> case answer p of
-        Just (Right v) -> p {pkgUpstreamVer = Just v}
-        Just (Left e) -> p {pkgUpstreamErr = Just ("update.rhai failed under anda: " <> e)}
+        Just (Right (v, events))
+          | unfollowable p -> p {pkgUpstreamVer = Just v, pkgSubmoduleEvents = events}
+          | otherwise -> p {pkgSubmoduleEvents = events}
+        Just (Left e) -> p {pkgUpstreamErr = pkgUpstreamErr p <|> Just ("update.rhai failed under anda: " <> e)}
         Nothing -> p
     )
+  where
+    unfollowable p = case pkgUpstream p of
+      Just (Unknown _) -> True
+      _ -> False
 
 -- | anything fetched since this run started is fresh, so checking several
 -- releases asks each upstream once even with --cache-hours 0

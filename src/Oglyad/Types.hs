@@ -4,6 +4,7 @@ module Oglyad.Types
     CrateField (..),
     Package (..),
     RepoBuild (..),
+    SubmoduleEvent (..),
     Severity (..),
     Finding (..),
     finding,
@@ -14,7 +15,7 @@ module Oglyad.Types
   )
 where
 
-import Data.Aeson (FromJSON, ToJSON (..), Value (String))
+import Data.Aeson (FromJSON (..), ToJSON (..), Value (String), object, withObject, (.:), (.=))
 import Data.Map.Strict (Map)
 import Data.Set (Set)
 import Data.Text (Text)
@@ -71,6 +72,25 @@ data RepoBuild = RepoBuild
   deriving stock (Eq, Show, Generic)
   deriving anyclass (ToJSON, FromJSON)
 
+data SubmoduleEvent
+  = SubmoduleAdded {sePath :: Text, seUrl :: Text, seCommit :: Text, seGlobal :: Text}
+  | SubmoduleDropped {seGlobal :: Text, seCommit :: Text}
+  deriving stock (Eq, Show)
+
+instance FromJSON SubmoduleEvent where
+  parseJSON = withObject "event" $ \o ->
+    o .: "kind" >>= \case
+      "submodule-added" -> SubmoduleAdded <$> o .: "path" <*> o .: "url" <*> o .: "commit" <*> o .: "global"
+      "submodule-dropped" -> SubmoduleDropped <$> o .: "global" <*> o .: "commit"
+      other -> fail ("unknown event " <> T.unpack other)
+
+instance ToJSON SubmoduleEvent where
+  toJSON = \case
+    SubmoduleAdded {..} ->
+      object ["kind" .= ("submodule-added" :: Text), "path" .= sePath, "url" .= seUrl, "commit" .= seCommit, "global" .= seGlobal]
+    SubmoduleDropped {..} ->
+      object ["kind" .= ("submodule-dropped" :: Text), "global" .= seGlobal, "commit" .= seCommit]
+
 data Package = Package
   { pkgName :: Text,
     -- | relative to the monorepo, e.g. anda/devs/zed/stable
@@ -94,6 +114,7 @@ data Package = Package
     -- | only filled in with --upstream
     pkgUpstreamVer :: Maybe Text,
     pkgUpstreamErr :: Maybe Text,
+    pkgSubmoduleEvents :: [SubmoduleEvent],
     -- | when False, pkgRepoBuild = Nothing means "unknown", not "never published"
     pkgRepoChecked :: Bool
   }
