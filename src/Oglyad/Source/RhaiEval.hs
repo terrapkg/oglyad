@@ -9,7 +9,6 @@ module Oglyad.Source.RhaiEval
   )
 where
 
-import Control.Applicative ((<|>))
 import Data.Char (isAlphaNum, isDigit)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
@@ -23,6 +22,7 @@ import Text.Read (readMaybe)
 
 data Simulated
   = Sets Text
+  | SetsGlobal Text Text
   | -- | `anda update` wouldn't touch the spec for this upstream value
     NoUpdate
   | CantTell
@@ -44,7 +44,10 @@ simulateVersion src upstream script = case tokenize script of
           Left GiveUp -> CantTell
   _ -> CantTell
   where
-    outcome env = maybe NoUpdate Sets (envVersion env <|> envGlobal env)
+    outcome env = case (envVersion env, envGlobal env) of
+      (Just v, _) -> Sets v
+      (Nothing, Just (key, v)) -> SetsGlobal key v
+      (Nothing, Nothing) -> NoUpdate
 
 data Value = VStr Text | VNum Int | VBool Bool | VArr [Value] | VUnit
   deriving stock (Eq, Show)
@@ -67,7 +70,7 @@ data Expr
 
 -- | rpm.version wins over rpm.global("ver", ...), since some scripts set the
 -- global to the raw tag and Version to a cleaned-up spelling of it
-data VersionTarget = RpmVersion | RpmGlobal
+data VersionTarget = RpmVersion | RpmGlobal Text
   deriving stock (Show)
 
 data Stmt
@@ -148,7 +151,7 @@ simple = \case
     | f `elem` ["global", "define"],
       key `elem` ["ver", "version"],
       Just [a] <- finalCallArgs r ->
-        SetVersion RpmGlobal a
+        SetVersion (RpmGlobal key) a
   TIdent "rpm" : TSym '.' : TIdent "f" : TSym '=' : t : _ | t /= TSym '=' -> RewritesSpec
   TIdent "rpm" : _ -> Ignored
   TIdent "print" : _ -> Ignored
@@ -296,7 +299,7 @@ data Env = Env
   { -- | Nothing is a value we can't know, like another helper's result
     envVars :: Map Text (Maybe Value),
     envVersion :: Maybe Text,
-    envGlobal :: Maybe Text
+    envGlobal :: Maybe (Text, Text)
   }
 
 emptyEnv :: Env
@@ -336,7 +339,7 @@ exec ctx env (s : ss) = step s >>= \env' -> exec ctx env' ss
       SetVersion target e -> case eval ctx env e of
         Right (VStr t) -> Right $ case target of
           RpmVersion -> env {envVersion = Just t}
-          RpmGlobal -> env {envGlobal = Just t}
+          RpmGlobal key -> env {envGlobal = Just (key, t)}
         Left Throw -> Left (Thrown env)
         _ -> Left GiveUp
       If c yes no -> case eval ctx env c of

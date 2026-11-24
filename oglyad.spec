@@ -29,6 +29,7 @@ BuildRequires:  ghc-http-types-devel
 BuildRequires:  ghc-megaparsec-devel
 BuildRequires:  ghc-mtl-devel
 BuildRequires:  ghc-optparse-applicative-devel
+BuildRequires:  ghc-rozbir-devel
 BuildRequires:  ghc-text-devel
 BuildRequires:  ghc-time-devel
 BuildRequires:  ghc-typed-process-devel

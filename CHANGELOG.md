@@ -1,5 +1,19 @@
 # changelog
 
+## unreleased
+
+- specs are evaluated with rozbir first, which needs no rpmspec and runs no
+  spec code. specs that run real commands or Lua still go through rpmspec.
+  over terrapkg/packages and tuatara, rozbir answers 2405 of 2461 specs and
+  agrees with rpmspec on all of them. `--rozbir shadow` checks that on a checkout,
+  and `--rozbir off` goes back to rpmspec only
+- the macros an update.rhai has to set now follow `%global` chains, so
+  `Version: %{ver}` with `%global ver %{major}.%{minor}` counts `major` too
+- `Oglyad.Version` takes EVR and rpmvercmp from rozbir
+- an update.rhai that only sets `%global ver` (or `version`) is replayed on
+  the spec with rozbir, so drift compares the whole Version it would produce,
+  like `1.3^20261101git`, instead of assuming Version is just `%{ver}`
+
 ## 0.1.6.0
 
 - new `submodules` check (`-u`): update.rhai scripts that call

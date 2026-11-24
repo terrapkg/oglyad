@@ -21,7 +21,7 @@ import Crypto.Hash.SHA256 qualified as SHA256
 import Data.Aeson (FromJSON, ToJSON)
 import Data.ByteString qualified as BS
 import Data.ByteString.Base16 qualified as B16
-import Data.Char (isAlphaNum, isSpace)
+import Data.Char (isSpace)
 import Data.List (sort)
 import Data.List qualified as List
 import Data.Map.Strict (Map)
@@ -38,6 +38,7 @@ import GHC.Generics (Generic)
 import Oglyad.Process (run)
 import Oglyad.Source.Cache (cacheDir)
 import Oglyad.Version (EVR, parseEVR)
+import Rozbir qualified
 import System.Directory (createDirectory, createDirectoryIfMissing, doesDirectoryExist, doesFileExist, getModificationTime, getSymbolicLinkTarget, listDirectory, pathIsSymbolicLink, removeFile, removePathForcibly, renameDirectory, setModificationTime)
 import System.FilePath (takeDirectory, takeExtension, (</>))
 import System.IO (hClose, openBinaryTempFile)
@@ -110,19 +111,14 @@ findPackageDirs root pkgRoot = go pkgRoot
 -- | read from the raw text, since rpmspec would expand away the macros an
 -- update.rhai has to set to change the version
 versionMacros :: Text -> Maybe [Text]
-versionMacros spec = case [T.strip v | l <- T.lines spec, Just v <- [stripTag l]] of
-  v : _ -> Just (names v)
-  [] -> Nothing
+versionMacros spec
+  | any isVersionTag (Rozbir.treeLines tree) = Just (Rozbir.versionInputs tree)
+  | otherwise = Nothing
   where
-    stripTag l = case T.breakOn ":" l of
-      (tag, rest) | T.toLower (T.strip tag) == "version", not (T.null rest) -> Just (T.drop 1 rest)
-      _ -> Nothing
-    names t = case T.breakOn "%" t of
-      (_, "") -> []
-      (_, rest) ->
-        let after = T.dropWhile (`elem` ("{?!" :: String)) (T.drop 1 rest)
-            (name, more) = T.span (\c -> isAlphaNum c || c == '_') after
-         in [name | not (T.null name)] <> names more
+    tree = Rozbir.parse spec
+    isVersionTag l = case Rozbir.lineBody l of
+      Rozbir.Tag t -> T.toLower (Rozbir.tagName t) == "version"
+      _ -> False
 
 -- | not a real HCL parser, but good enough for the flat labels and rpm
 -- blocks anda uses

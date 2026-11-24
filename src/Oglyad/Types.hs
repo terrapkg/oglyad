@@ -10,6 +10,7 @@ module Oglyad.Types
     finding,
     Snapshot (..),
     Config (..),
+    RozbirMode (..),
     repoUrl,
     Check,
   )
@@ -153,6 +154,9 @@ finding check p sev msg =
       fReleases = []
     }
 
+data RozbirMode = RozbirOff | RozbirShadow | RozbirFirst
+  deriving stock (Eq, Show)
+
 data Config = Config
   { cfgMonorepo :: FilePath,
     cfgRoot :: FilePath,
@@ -178,7 +182,8 @@ data Config = Config
     -- says, so checking several releases asks each upstream once
     cfgRunStart :: UTCTime,
     cfgConcurrency :: Int,
-    cfgGitHubToken :: Maybe Text
+    cfgGitHubToken :: Maybe Text,
+    cfgRozbir :: RozbirMode
   }
   deriving stock (Show)
 
