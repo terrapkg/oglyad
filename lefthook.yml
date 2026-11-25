@@ -1,0 +1,20 @@
+pre-commit:
+  parallel: true
+  jobs:
+    - name: ormolu
+      glob: "*.hs"
+      run: ormolu --mode inplace {staged_files}
+      stage_fixed: true
+
+    - name: cabal check
+      glob: "*.cabal"
+      run: cabal check
+
+    - name: korektor
+      glob: "*.spec"
+      run: command -v korektor >/dev/null || exit 0; korektor lint {staged_files}
+
+pre-push:
+  jobs:
+    - name: build and test
+      run: cabal test all --ghc-options=-Werror --builddir=dist-newstyle/lefthook --test-show-details=failures
