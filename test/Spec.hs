@@ -29,6 +29,7 @@ import Oglyad.Source.Monorepo (PkgDir (..), checkoutRef, findPackageDirs, hclLis
 import Oglyad.Source.Repodata (RpmEntry (..), decompressAndParse, fetchRepo, latestBySource, parseMetalink, parsePrimary, srpmName)
 import Oglyad.Source.Rhai (parseUpdateRhai, parseUpdateRhaiWith, tracksSubmodules)
 import Oglyad.Source.RhaiEval (Simulated (..), simulateVersion)
+import Oglyad.Source.Rozbir (versionAfterGlobal)
 import Oglyad.Source.Upstream (isSemver)
 import Oglyad.Types
 import Oglyad.Version
@@ -170,7 +171,7 @@ main = hspec $ do
       sim "v0.0.17-beta-release" script `shouldBe` Sets "0.0.17~beta"
     it "treats rpm.changed() as true and follows truncate" $ do
       let script = "rpm.global(\"commit\", gh_commit(\"a/b\"));\nif rpm.changed() {\n    rpm.release();\n    let v = gh(\"a/b\");\n    v.truncate(6);\n    v.crop(1);\n    rpm.global(\"ver\", v);\n}"
-      sim "v1.0.1-iot-arl-twl-asl-v6.12" script `shouldBe` Sets "1.0.1"
+      sim "v1.0.1-iot-arl-twl-asl-v6.12" script `shouldBe` SetsGlobal "ver" "1.0.1"
     it "gives up on scripts that rewrite the spec through rpm.f" $
       sim "v1.2.3" "let v = gh(\"a/b\");\nrpm.f = sub(`(?m)^Version:.*$`, \"Version: \" + v, rpm.f);" `shouldBe` CantTell
     it "knows a script that never sets Version won't update" $
@@ -345,13 +346,21 @@ main = hspec $ do
       UnparsedRhai.check snapshot unknown {pkgUpdBranch = False} `shouldBe` []
       map fCheck (UnparsedRhai.check rawhide unknown {pkgUpdBranch = False}) `shouldBe` ["unparsed-rhai"]
 
+  describe "versionAfterGlobal" $ do
+    it "reads Version after setting the global" $
+      versionAfterGlobal [] "ver" "1.3" "%global ver 1.2\n%global commit_date 20261101\nName: x\nVersion: %{ver}^%{commit_date}git\n" `shouldBe` Just "1.3^20261101git"
+    it "gives up when the global isn't there" $
+      versionAfterGlobal [] "ver" "1.3" "Name: x\nVersion: 1.2\n" `shouldBe` Nothing
+
   describe "versionMacros" $ do
     it "finds %name, %{name} and %{?name}" $
-      versionMacros "Name: x\nVersion:  %{?fedora:%{fedora}}%{?rhel:%{rhel}}\n" `shouldBe` Just ["fedora", "fedora", "rhel", "rhel"]
+      versionMacros "Name: x\nVersion:  %{?fedora:%{fedora}}%{?rhel:%{rhel}}\n" `shouldBe` Just ["fedora", "rhel"]
     it "finds macros inside shell expansions" $
       versionMacros "%global tag cli-v0.3.0\nVersion: %(echo %tag | sed 's/^cli-v//')\n" `shouldBe` Just ["tag"]
     it "is Nothing without a Version: line" $
       versionMacros "Name: x\n" `shouldBe` Nothing
+    it "follows %global chains" $
+      versionMacros "%global major 1\n%global ver %{major}.2\nVersion: %{ver}\n" `shouldBe` Just ["ver", "major"]
 
     it "falls back to Unknown" $
       parseUpdateRhai "let x = get(\"https://example.com\").json();\nrpm.version(x.version);" `shouldSatisfy` isUnknown
@@ -779,7 +788,8 @@ snapshot =
             cfgCacheFor = 0,
             cfgRunStart = now,
             cfgConcurrency = 1,
-            cfgGitHubToken = Nothing
+            cfgGitHubToken = Nothing,
+            cfgRozbir = RozbirOff
           },
       snapHead = Nothing,
       snapIgnoreLabels = Map.empty

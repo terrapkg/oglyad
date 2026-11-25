@@ -208,7 +208,11 @@ submodule in the script's `ignore` list isn't reported.
 checks are `Snapshot -> Package -> [Finding]` and never do IO, so each one is
 tested with a fake `Snapshot` in `test/Spec.hs`.
 
-- **specs** are evaluated with `rpmspec`
+- **specs** are evaluated with [rozbir](https://github.com/terrapkg/rozbir),
+  which expands macros without running anything. specs it can't finish
+  (`%(...)`, `%{lua:...}`) fall back to `rpmspec`. `--rozbir shadow` runs
+  both and notes every spec where they disagree, and `--rozbir off` always
+  runs `rpmspec`
 - **update.rhai** is lexed and pattern-matched, not run. it follows `let`
   bindings into `rpm.version(...)` / `rpm.global("ver", ...)` and recognizes
   the andax helpers (`gh`, `pypi`, `crates`, `gitlab`, ...)
@@ -238,7 +242,9 @@ that it's cached until Fedora publishes again.
 ## security
 
 `rpmspec` runs the shell code in specs (`%(...)`, `%{lua:...}`), so running
-oglyad on a checkout means running that checkout's code as you. child
+oglyad on a checkout means running that checkout's code as you. rozbir
+answers for about 98% of specs without running anything, so only the rest go
+through rpmspec. child
 processes get an allowlisted environment, so `GITHUB_TOKEN` and other
 secrets in oglyad's environment never reach them, but code running as your
 user can still read your files.

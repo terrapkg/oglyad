@@ -6,13 +6,14 @@ where
 import Control.Applicative ((<|>))
 import Control.Concurrent.Async (concurrently)
 import Control.Concurrent.MVar (withMVar)
-import Control.Monad (forM, join)
+import Control.Exception (IOException, try)
+import Control.Monad (forM, join, when)
 import Control.Monad.Reader (ask, asks, liftIO, runReaderT)
 import Data.Either (partitionEithers)
 import Data.List (nub, partition)
 import Data.Map.Strict (Map)
 import Data.Map.Strict qualified as Map
-import Data.Maybe (fromMaybe, isJust, isNothing, mapMaybe)
+import Data.Maybe (catMaybes, fromMaybe, isJust, isNothing, mapMaybe)
 import Data.Text (Text)
 import Data.Text qualified as T
 import Data.Time (NominalDiffTime, UTCTime, diffUTCTime, getCurrentTime, nominalDay)
@@ -23,8 +24,10 @@ import Oglyad.Source.Monorepo
 import Oglyad.Source.Repodata (fetchRepo)
 import Oglyad.Source.Rhai (parseUpdateRhaiWith, tokenize, tracksSubmodules)
 import Oglyad.Source.RhaiEval (Simulated (..), simulateVersion)
+import Oglyad.Source.Rozbir (Mismatch (..), evaluateSpec, mismatches, newEvaluator, versionAfterGlobal)
 import Oglyad.Source.Upstream (latestVersion)
 import Oglyad.Types
+import Rozbir.IO (readSpecText)
 import System.Directory (findExecutable, makeAbsolute)
 import System.FilePath ((</>))
 import System.Info qualified
@@ -89,7 +92,7 @@ upstreamVersions now root pkgs = do
   ((upErrs, fromApis), (andaErrs, fromAnda)) <-
     liftIO $
       concurrently
-        (runReaderT (withUpstreams now pkgs) env)
+        (runReaderT (withUpstreams now root pkgs) env)
         (runReaderT (maybe (pure ([], id)) (\r -> withAnda r now pkgs) root) env)
   pure (upErrs <> andaErrs, fromAnda . fromApis)
 
@@ -126,16 +129,20 @@ readPackages root0 logRef headSha dirs = do
   -- without rpmspec, cached evaluations still work. everything else is
   -- skipped and reported once, rather than as one error per package
   hasRpmspec <- liftIO (isJust <$> findExecutable "rpmspec")
+  evaluator <- liftIO (newEvaluator cfgRozbir)
   inSlot <- processSlot
   results <- forConcurrentlyN cfgConcurrency keyed $ \(key, d) -> liftIO $ do
     case (Map.lookup key cache, pdSpec d) of
       (Just cached, _) -> pure (Evaluated key d cached)
       (Nothing, Just spec)
-        | hasRpmspec -> Evaluated key d <$> inSlot (querySpec cfgMacros (root </> spec))
+        | hasRpmspec || cfgRozbir == RozbirFirst -> Evaluated key d <$> inSlot (evaluateSpec evaluator cfgMacros (root </> spec))
         | otherwise -> pure Skipped
       (Nothing, Nothing) -> pure (NoSpec d)
   -- keep only entries for packages that still exist, so the file can't grow forever
   liftIO (saveJson cacheFile (Map.fromList [(k, i) | Evaluated k _ i <- results]))
+  shadowed <- liftIO (mismatches evaluator)
+  mapM_ (\Mismatch {..} -> note ("rozbir disagrees with rpmspec on " <> mmSpec <> ": " <> T.unpack mmRozbir <> " vs " <> T.unpack mmRpmspec)) shadowed
+  when (cfgRozbir == RozbirShadow) (note ("rozbir shadow mode: " <> show (length shadowed) <> " mismatches"))
   let skipped = length [() | Skipped <- results]
       missing =
         [ collectErr "rpmspec" ("rpmspec not found, install rpm-build. skipped " <> T.pack (show skipped) <> " specs with no cached result")
@@ -206,8 +213,8 @@ toPackage commits key PkgDir {..} = \case
 -- | crates.io allows one request a second, so its lookups run in their own
 -- serial queue next to everything else. inside the shared job pool, a cluster
 -- of crates packages would hold every slot while waiting their turn
-withUpstreams :: UTCTime -> [Package] -> App ([Finding], Package -> Package)
-withUpstreams now pkgs = do
+withUpstreams :: UTCTime -> Maybe FilePath -> [Package] -> App ([Finding], Package -> Package)
+withUpstreams now root pkgs = do
   cfg@Config {..} <- asks envConfig
   cache <- liftIO (fromMaybe Map.empty <$> loadJson "upstream.json") :: App UpstreamCache
   let wanted = [p | p <- pkgs, Just src <- [pkgUpstream p], lookable src]
@@ -244,6 +251,17 @@ withUpstreams now pkgs = do
               }
           ]
   saveSharedCache "upstream.json" now new
+  specTexts <-
+    liftIO . fmap (Map.fromList . catMaybes) $
+      forM [(pkgPath p, r </> sp) | Just r <- [root], p <- wanted, Just sp <- [pkgSpecPath p]] $ \(path, file) ->
+        either (\(_ :: IOException) -> Nothing) (\t -> Just (path, t)) <$> try (readSpecText file)
+  let replay p v = case (pkgUpstream p, pkgRhai p) of
+        (Just src, Just script) -> case simulateVersion src v script of
+          Sets v' -> Just v'
+          SetsGlobal key v' -> Just (fromMaybe v' (Map.lookup (pkgPath p) specTexts >>= versionAfterGlobal cfgMacros key v'))
+          NoUpdate -> Nothing
+          CantTell -> Just v
+        _ -> Just v
   pure
     ( rateErr,
       \p -> case Map.lookup (pkgPath p) byPath of
@@ -255,14 +273,6 @@ withUpstreams now pkgs = do
     )
   where
     cacheKey src = T.pack (show src)
-    -- run the script's guards and edits over the raw value, so a tag the
-    -- script would skip (or crop) doesn't show up as drift
-    replay p v = case (pkgUpstream p, pkgRhai p) of
-      (Just src, Just script) -> case simulateVersion src v script of
-        Sets v' -> Just v'
-        NoUpdate -> Nothing
-        CantTell -> Just v
-      _ -> Just v
     lookable = \case
       CommitTracked -> False
       NoVersion -> False
@@ -302,6 +312,7 @@ withAnda root now pkgs = do
           note ("running anda update for " <> show (length wanted) <> " scripts that need anda, " <> show (length wanted - length misses) <> " cached")
           env <- ask
           inSlot <- processSlot
+          evaluator <- liftIO (newEvaluator cfgRozbir)
           r <- liftIO $ withScratchCopy root $ \copy ->
             projectNames copy >>= \case
               Left e -> pure (Left e)
@@ -313,7 +324,7 @@ withAnda root now pkgs = do
                         Left e -> pure (Left e)
                         Right events ->
                           either (Left . ("rpmspec failed on the updated spec: " <>)) (\i -> Right (evrVersion (siEVR i), events))
-                            <$> querySpec cfgMacros (copy </> spec)
+                            <$> evaluateSpec evaluator cfgMacros (copy </> spec)
                     _ -> pure (Left "anda doesn't list this project")
           pure $ case join r of
             Left e -> ([(collectErr "anda" e) {fSeverity = Warn}], Map.empty)

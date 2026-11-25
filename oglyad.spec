@@ -2,7 +2,7 @@
 %bcond tests 1
 
 Name:           oglyad
-Version:        0.1.6.0
+Version:        0.1.7.0
 Release:        1%{?dist}
 Summary:        Repository metadata and health checker for Terra
 
@@ -29,6 +29,7 @@ BuildRequires:  ghc-http-types-devel
 BuildRequires:  ghc-megaparsec-devel
 BuildRequires:  ghc-mtl-devel
 BuildRequires:  ghc-optparse-applicative-devel
+BuildRequires:  ghc-rozbir-devel
 BuildRequires:  ghc-text-devel
 BuildRequires:  ghc-time-devel
 BuildRequires:  ghc-typed-process-devel

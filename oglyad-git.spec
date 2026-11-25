@@ -1,7 +1,7 @@
 # the test suite runs offline and only needs git, rpm and the decompressors
 %bcond tests 1
 
-%global _version 0.1.6.0
+%global _version 0.1.7.0
 
 Name:           oglyad
 Version:        %{_version}^%{autogitversion}
@@ -33,6 +33,7 @@ BuildRequires:  ghc-http-types-devel
 BuildRequires:  ghc-megaparsec-devel
 BuildRequires:  ghc-mtl-devel
 BuildRequires:  ghc-optparse-applicative-devel
+BuildRequires:  ghc-rozbir-devel
 BuildRequires:  ghc-text-devel
 BuildRequires:  ghc-time-devel
 BuildRequires:  ghc-typed-process-devel

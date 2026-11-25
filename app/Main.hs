@@ -26,6 +26,7 @@ import Oglyad.Release
 import Oglyad.Report (Format (..), ReleaseInfo (..), Report (..), render)
 import Oglyad.Source.Cache (loadJson, saveJson)
 import Oglyad.Source.Monorepo (pruneTrees)
+import Oglyad.Source.Rozbir (parseRozbirMode)
 import Oglyad.Types
 import Options.Applicative
 import System.Directory (doesDirectoryExist)
@@ -106,6 +107,7 @@ configP = do
   cfgUpstream <- switch (long "upstream" <> short 'u' <> help "query upstream APIs for version drift")
   cacheHours <- option auto (long "cache-hours" <> metavar "N" <> value (6 :: Int) <> showDefault <> help "reuse upstream answers younger than this, 0 to always refetch")
   jobs <- optional (option auto (long "jobs" <> short 'j' <> metavar "N" <> help "parallel jobs (default: number of cores)"))
+  cfgRozbir <- option (eitherReader parseRozbirMode) (long "rozbir" <> metavar "MODE" <> value RozbirFirst <> help "how specs get evaluated: first asks rozbir and only runs rpmspec for specs it can't finish (the default), shadow runs both and reports where they differ, off always runs rpmspec")
   pure $ \ConfigInputs {ciDistro = distro, ciRelease = rel, ..} ->
     Config
       { cfgGitHubToken = ciGitHubToken,
