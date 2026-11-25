@@ -1,6 +1,6 @@
 # changelog
 
-## unreleased
+## 0.1.7.0
 
 - specs are evaluated with rozbir first, which needs no rpmspec and runs no
   spec code. specs that run real commands or Lua still go through rpmspec.
